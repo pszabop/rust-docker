@@ -1,0 +1,25 @@
+services:
+  rust_dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      RUST_BACKTRACE: full
+      CARGO_HOME: /app
+    working_dir: /app
+    volumes:
+      - .:/app
+    ports:
+      - "42069:42069"
+    command: 'bash'
+
+  garnet:
+    image: 'registry.redict.io/redict:7-scratch'
+    hostname: "garnetlocal"  
+    ulimits:
+      memlock: -1
+    ports:
+      - "6379:6379"
+    # volumes:
+    #  - garnetdata:/data
+

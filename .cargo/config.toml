@@ -1,0 +1,10 @@
+[dev]
+incremental = true
+debug = 1
+[profile.release]
+debug = 1
+incremental = true
+
+# the default linker provided by Rust is horribly horribly slow
+[build]
+rustflags = ["-Clink-args=-fuse-ld=lld"]
