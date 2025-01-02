@@ -14,12 +14,13 @@ services:
     command: 'bash'
 
   garnet:
-    image: 'registry.redict.io/redict:7-scratch'
+    image: 'ghcr.io/microsoft/garnet'
     hostname: "garnetlocal"  
     ulimits:
       memlock: -1
     ports:
       - "6379:6379"
+    command: '/app/GarnetServer --logger-level Trace'
     # volumes:
     #  - garnetdata:/data
 
