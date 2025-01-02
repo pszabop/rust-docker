@@ -14,7 +14,9 @@ services:
     command: 'bash'
 
   garnet:
-    image: 'ghcr.io/microsoft/garnet'
+    #image: 'ghcr.io/microsoft/garnet:1.0.33'
+    # built locally from 1.0.33 with debug/trace statements uncommented
+    image: 'garnet_trace'
     hostname: "garnetlocal"  
     ulimits:
       memlock: -1
