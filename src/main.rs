@@ -1,5 +1,5 @@
-// the documentation never mentions how to do this. I had to have
-// the AI figure it out for me.  This is why I am writing this
+// the documentation never mentions how to do combine redis and deadpool_redis.
+// I had to have the AI figure it out for me.  This is why I am writing this
 // example.  I hope it helps someone else.
 use deadpool_redis::{redis::{AsyncCommands}, Config, Runtime};
 use tokio::time::{sleep, Duration, Instant};
