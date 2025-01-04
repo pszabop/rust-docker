@@ -20,12 +20,13 @@ bytes = "1"
 memchr = "2.7.4"
 redis = { version = "0.27.2", features = ["tokio-comp"] }
 uuid = { version = "^1.11.0", features = ["v4", "v5"]}
-arrayvec = "0.7.6"
 simhash = "0.2.0"
 rand = "^0.8"
 xxhash-rust = { version = "^0.8", features = ["xxh32", "xxh3"]}
 tlsh = "*"
 ffuzzy = "0.3.12"
 nilsimsa = "0.2.0"
+arrayvec = "^0.7"
+
 
 [dev-dependencies]

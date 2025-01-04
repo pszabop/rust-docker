@@ -1,31 +1,99 @@
 #![allow(dead_code)]
 use rand::Rng;
-use simhash;
-use std::fs;
-use xxhash_rust::xxh3::xxh3_64; // Example 32-bit hash
-use std::cmp::min;
-use ssdeep;
+use rand::distributions::Alphanumeric;
+use std::collections::HashMap;
+use std::time::Instant;
+use arrayvec::ArrayVec;
 use nilsimsa;
 
-/* 
-    */
+const SEGMENT_SIZE: usize = 24; // Number of bits per segment
+const OVERLAP_SIZE: usize = 8; // Number of overlapping bits
+const NUM_SEGMENTS: usize = (64 - SEGMENT_SIZE) / (SEGMENT_SIZE - OVERLAP_SIZE) + 1; // Number of segments
+const NUM_STRINGS: usize = 1_000_000; // Number of random strings to generate
+const STRING_SIZE: usize = 128; // Size of each random string in bytes
+const INITIAL_VEC_CAPACITY: usize = 8;
+const BATCH_SIZE: u64 = 10_000;
+
 fn main() {
-    // Read the contents of the JSON files as strings
-    let first_long = fs::read_to_string("chrome_values.json")
-        .expect("Unable to read file chrome_values.json");
-    let second_long = fs::read_to_string("firefox_values.json")
-        .expect("Unable to read file firefox_values.json");
+    let mut rng = rand::thread_rng();
+    //let mut sets: HashMap<String, Vec<u64>> = HashMap::with_capacity(NUM_STRINGS * NUM_SEGMENTS);
+    let mut sets: HashMap<(usize, u32), ArrayVec<u64, INITIAL_VEC_CAPACITY>> = HashMap::with_capacity(NUM_STRINGS * NUM_SEGMENTS);
+    //let mut sets: HashMap<String, Vec<u64>> = HashMap::new();
+    let mut ctr:u64 = 0;
 
-    // Call the function to output the hashes and other results
-    let first_hash = stable_document_hash(&first_long);
-    let second_hash = stable_document_hash(&second_long);
-    output_results(first_hash, second_hash);
+    let mut total_gen_time = 0;
+    let mut total_hash_time = 0;
+    let mut total_segment_time = 0;
+    let mut total_set_time = 0;
 
-    let modified_string = randomly_modify_string(&first_long, 10);
-    let modified_hash = stable_document_hash(&modified_string);
-    output_results(first_hash, modified_hash);
+    for _ in 0..NUM_STRINGS {
+        ctr += 1;
+
+        let start = Instant::now();
+        let random_string: String = (0..STRING_SIZE)
+            .map(|_| rng.sample(Alphanumeric) as char)
+            .collect();
+        total_gen_time += start.elapsed().as_micros();
+
+        let start = Instant::now();
+        let hash = stable_document_hash(&random_string);
+        total_hash_time += start.elapsed().as_micros();
+
+        let start = Instant::now();
+        let segments = create_segments(hash);
+        total_segment_time += start.elapsed().as_micros(); 
+
+        for (i, segment) in segments.iter().enumerate() {
+            //let bucket_key = format!("bucket:{}:{}", i, segment);
+            let bucket_key = (i, *segment);
+            let start = Instant::now();
+            sets.entry(bucket_key).or_insert_with(|| ArrayVec::new()).push(hash);
+            total_set_time += start.elapsed().as_micros();
+        }
+        if ctr % BATCH_SIZE == 0 {
+            println!("Processed {} strings", ctr);
+            println!("Average time per {} strings:", BATCH_SIZE);
+            println!("  Generation: {} µs", total_gen_time / BATCH_SIZE as u128 );
+            println!("  Hashing: {} µs", total_hash_time / BATCH_SIZE as u128 );
+            println!("  Segment creation: {} µs", total_segment_time / BATCH_SIZE as u128 );
+            println!("  hash insertion time {} µs", total_set_time / BATCH_SIZE as u128 );
+            println!("  HashMap size: {}", sets.len());
+            println!("  HashMap capacity: {}", sets.capacity());
+            total_gen_time = 0;
+            total_hash_time = 0;
+            total_segment_time = 0;
+            total_set_time = 0;
+
+            // Monitor for hash collisions
+            let mut bucket_sizes: Vec<usize> = sets.values().map(|v| v.len()).collect();
+            bucket_sizes.sort_unstable();
+            let median_bucket_size = bucket_sizes[bucket_sizes.len() / 2];
+            let max_bucket_size = bucket_sizes[bucket_sizes.len() - 1];
+            println!("  Median bucket size: {}", median_bucket_size);
+            println!("  Max bucket size: {}", max_bucket_size);
+        }
+    }
+
+    // Calculate the size of each set
+    let mut max_set_size = 0;
+    let mut total_set_size = 0;
+    let mut num_sets = 0;
+
+    for set in sets.values() {
+        let set_size = set.len();
+        if set_size > max_set_size {
+            max_set_size = set_size;
+        }
+        total_set_size += set_size;
+        num_sets += 1;
+    }
+
+    let average_set_size = total_set_size as f64 / num_sets as f64;
+
+    println!("Number of sets: {}", num_sets);
+    println!("Maximum set size: {}", max_set_size);
+    println!("Average set size: {:.2}", average_set_size);
 }
-
 
 fn stable_document_hash(input: &str) -> u64 {
     let mut hasher = nilsimsa::Nilsimsa::new();
@@ -36,229 +104,14 @@ fn stable_document_hash(input: &str) -> u64 {
     u64::from_str_radix(truncated_hex, 16).expect("Invalid hex from Nilsimsa")
 }
 
-fn stable_document_hash6(input: &str) -> u64 {
-    weighted_bit_count_hash(input, 8)
-}
+fn create_segments(hash: u64) -> Vec<u32> {
+    let mut segments = Vec::new();
 
-fn weighted_bit_count_hash(input: &str, chunk_size: usize) -> u64 {
-    let mut bit_counts = [0i32; 64];
-    let chunks: Vec<&str> = input.split(',').collect();
-
-    for chunk in chunks {
-        let chunk_hash = xxh3_64(chunk.as_bytes());
-
-        for bit_pos in 0..64 {
-            if (chunk_hash & (1 << bit_pos)) != 0 {
-                bit_counts[bit_pos] += 1;
-            } else {
-                bit_counts[bit_pos] -= 1;
-            }
-        }
+    for i in 0..NUM_SEGMENTS {
+        let shift = i * (SEGMENT_SIZE - OVERLAP_SIZE);
+        let segment = ((hash >> shift) & ((1 << SEGMENT_SIZE) - 1)) as u32;
+        segments.push(segment);
     }
 
-    let mut result = 0u64;
-    for bit_pos in 0..64 {
-        if bit_counts[bit_pos] >= 0 {
-            result |= 1 << bit_pos;
-        }
-    }
-
-    result
-}
-
-/*
-fn main() {
-    let first_long = fs::read_to_string("chrome_values.json")
-        .expect("Unable to read file chrome_values.json");
-    println!("{:?}", ssdeep::hash_buf(&first_long.as_bytes()));
-    let modified_string = randomly_modify_string(&first_long, 10);
-    println!("{:?}", ssdeep::hash_buf(&modified_string.as_bytes()));
-}
-    */
-
-
-
-// this one sucks worse than simhash itself
-use tlsh::{Tlsh, Version, BucketKind, ChecksumKind, TlshBuilder};
-fn stable_document_hash5(input: &str) -> u64 {
-    let mut builder = TlshBuilder::new(
-        BucketKind::Bucket128,
-        ChecksumKind::OneByte,
-        tlsh::Version::Version4,
-     );
-     builder.update(input.as_bytes());
-     let tlsh = builder.build().unwrap();
-         // `tlsh.hash()` returns a hex-encoded string; take the first 16 hex digits for 64 bits
-    let hex_str = tlsh.hash();
-    println!("TLSH: {}", hex_str);
-    let truncated_hex = &hex_str[24..40]; // 16 hex digits = 64 bits
-    u64::from_str_radix(truncated_hex, 16).expect("Invalid hex from TLSH")
-}
-
-
-fn stable_document_hash4(input: &str) -> u64 {
-    stable_fuzzy_hash(input, 4)
-}
-
-/// Fuzzy hash that remains nearly the same if only a few characters change.
-/// allegedyl
-fn stable_fuzzy_hash(input: &str, chunk_size: usize) -> u64 {
-    // We'll accumulate bit counts for 64 bits
-    let mut bit_counts = [0i32; 64];
-
-    // Split the input into fixed-size chunks
-    let bytes = input.as_bytes();
-    let mut start = 0;
-    while start < bytes.len() {
-        let end = min(start + chunk_size, bytes.len());
-        let chunk = &bytes[start..end];
-
-        // Hash this chunk to 64 bits
-        let chunk_hash = xxh3_64(chunk);
-
-        // For each bit in the chunk hash, increment or decrement the counter
-        for bit_pos in 0..64 {
-            if (chunk_hash & (1 << bit_pos)) != 0 {
-                bit_counts[bit_pos] += 1;
-            } else {
-                bit_counts[bit_pos] -= 1;
-            }
-        }
-
-        start += chunk_size;
-    }
-
-    // Construct final 64-bit hash: if count >= 0, set bit
-    let mut result = 0u64;
-    for bit_pos in 0..64 {
-        if bit_counts[bit_pos] >= 0 {
-            result |= 1 << bit_pos;
-        }
-    }
-
-    result
-}
-
-/*
-fn stable_document_hash3(input: &str) -> u64 {
-    chunked_simhash(input, Some(8))
-}
-fn chunked_simhash(input: &str, chunk_size: Option<usize>) -> u64 {
-    let size = chunk_size.unwrap_or(8);
-    let mut combined_hash = 0u64;
-    let len = input.len();
-    let mut start = 0;
-
-    while start < len {
-        let end = std::cmp::min(start + size, len);
-        let chunk_str = &input[start..end];
-        let chunk_hash = simhash::simhash(&chunk_str);
-        combined_hash ^= chunk_hash;
-        start += size;
-    }
-
-    combined_hash
-}
-    */
-fn stable_document_hash2(input: &str) -> u64 {
-    const BASE: u64 = 257;  // Base for rolling hash
-    const MOD: u64 = (1 << 61) - 1; // Large prime modulus
-    const MASK_LOWER: u64 = 0xFFFFFFFF; // Mask for lower 32 bits
-
-    let mut upper: u64 = 0; // Stable upper bits
-    let mut lower: u64 = 0; // Volatile lower bits
-    let mut base_pow: u64 = 1;
-
-    for (i, &byte) in input.as_bytes().iter().enumerate() {
-        let byte_val = byte as u64;
-
-        // Update upper: weighted by position to favor stability
-        upper = upper
-            .wrapping_add(byte_val.wrapping_mul(base_pow % MOD))
-            .wrapping_rem(MOD);
-
-        // Update lower: sensitive to individual bytes
-        lower = lower
-            .wrapping_add(byte_val.wrapping_mul((i as u64 + 1)))
-            .wrapping_rem(MOD);
-
-        // Update base power for next round
-        base_pow = base_pow.wrapping_mul(BASE).wrapping_rem(MOD);
-    }
-
-    // Combine upper and lower
-    (upper & !MASK_LOWER) | (lower & MASK_LOWER)
-}
-
-
-fn stable_document_hash1(doc: &str) -> u64 {
-    // Break the document into 16-byte chunks
-    let chunk_size = 16;
-    let bytes = doc.as_bytes();
-    let mut bit_counts = [0i32; 64];
-
-    // For each chunk, compute 32-bit hash, then spread bits into a 64-bit pattern
-    for chunk_start in (0..bytes.len()).step_by(chunk_size) {
-        let chunk_end = min(chunk_start + chunk_size, bytes.len());
-        let hash_32 = xxh3_64(&bytes[chunk_start..chunk_end]) as u64;
-
-        // For each bit, increment or decrement
-        for bit_pos in 0..32 {
-            if (hash_32 & (1 << bit_pos)) != 0 {
-                bit_counts[bit_pos as usize] += 1;
-            } else {
-                bit_counts[bit_pos as usize] -= 1;
-            }
-        }
-    }
-
-    // Combine bits to produce a final 64-bit value (top 32 bits will remain zeroed)
-    let mut result = 0u64;
-    for bit_pos in 0..64 {
-        if bit_pos < 32 && bit_counts[bit_pos] >= 0 {
-            result |= 1 << bit_pos;
-        }
-    }
-
-    result
-}
-
-fn stable_document_hash0(doc: &str) -> u64 {
-    return simhash::simhash(doc);
-}
-
-fn output_results(h: u64, i: u64) {
-    let bithamming = simhash::hamming_distance(h, i);
-    let distance = simhash::hash_similarity(h, i);
-    println!("Hamming distance: {}, float distance: {}", bithamming, distance);
-
-    println!("{:<64} {:<16}", "Binary (64 bits)", "Hexadecimal (16 hex digits)");
-    println!("{:<64} {:<16}", format!("{:064b}", h), format!("{:016x}", h));
-    println!("{:<64} {:<16}", format!("{:064b}", i), format!("{:016x}", i));
-}
-
-fn output_results128(h: u128, i: u128) {
-    //println!("Hamming distance: {}, float distance: {}", bithamming, distance);
-
-    println!("{:<128} {:<16}", "Binary (64 bits)", "Hexadecimal (16 hex digits)");
-    println!("{:<128} {:<16}", format!("{:128b}", h), format!("{:032x}", h));
-    println!("{:<128} {:<16}", format!("{:128b}", i), format!("{:032x}", i));
-}
-
-
-fn randomly_modify_string(input: &str, n: usize) -> String {
-    let mut rng = rand::thread_rng();
-    let mut chars: Vec<char> = input.chars().collect();
-    let len = chars.len();
-
-    for _ in 0..n {
-        let mut idx = rng.gen_range(0..len);
-        while chars[idx] == ',' {
-            idx = rng.gen_range(0..len);
-        }
-        let new_char = rng.gen_range(b'a'..=b'z') as char;
-        chars[idx] = new_char;
-    }
-
-    chars.into_iter().collect()
+    segments
 }
