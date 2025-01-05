@@ -1,6 +1,9 @@
 // use fastrand; // not fast enough, 40-50ns per random number!
+mod cache_thrasher;
+
 use tokio::task;
 use tokio::time::Instant;
+
 
 const BUFFER_SIZE: usize = 1 << 28; // 256MB per thread
 
