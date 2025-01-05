@@ -1,104 +1,115 @@
-// use fastrand; // not fast enough, 40-50ns per random number!
 mod cache_thrasher;
+use std::cmp::Ordering;
+use std::time::Instant;
+use rand::Rng;
 
-use tokio::task;
-use tokio::time::Instant;
-
-
-const BUFFER_SIZE: usize = 1 << 28; // 256MB per thread
-
-/// Struct representing a buffer range.
-#[derive(Clone, Copy)]
-struct BufferRange {
-    start: usize,
-    end: usize,
+#[derive(Debug)]
+struct TreeNode {
+    key: String,
+    value: String,
+    left: Option<Box<TreeNode>>,
+    right: Option<Box<TreeNode>>,
 }
 
-/// Creates non-overlapping buffer ranges.
-fn create_ranges(total_size: usize, range_sizes: &[usize]) -> Vec<BufferRange> {
-    let mut ranges = Vec::new();
-    let mut current_start = 0;
-
-    for &size in range_sizes {
-        if current_start + size > total_size {
-            break;
+impl TreeNode {
+    fn new(key: String, value: String) -> Self {
+        TreeNode {
+            key,
+            value,
+            left: None,
+            right: None,
         }
-        ranges.push(BufferRange {
-            start: current_start,
-            end: current_start + size,
-        });
-        current_start += size;
     }
 
-    ranges
-}
-
-struct SimpleRng {
-    state: u64,
-}
-
-impl SimpleRng {
-    fn new(seed: u64) -> Self {
-        SimpleRng { state: seed }
-    }
-
-    fn next(&mut self) -> u64 {
-        // Constants for the LCG
-        const A: u64 = 6364136223846793005;
-        const C: u64 = 1;
-        self.state = self.state.wrapping_mul(A).wrapping_add(C);
-        self.state
-    }
-
-    fn next_usize(&mut self, range: std::ops::Range<usize>) -> usize {
-        (self.next() as usize % (range.end - range.start)) + range.start
+    fn insert(&mut self, key: String, value: String) {
+        match key.cmp(&self.key) {
+            Ordering::Less => {
+                if let Some(ref mut left) = self.left {
+                    left.insert(key, value);
+                } else {
+                    self.left = Some(Box::new(TreeNode::new(key, value)));
+                }
+            }
+            Ordering::Greater => {
+                if let Some(ref mut right) = self.right {
+                    right.insert(key, value);
+                } else {
+                    self.right = Some(Box::new(TreeNode::new(key, value)));
+                }
+            }
+            Ordering::Equal => {
+                self.value = value;
+            }
+        }
     }
 }
 
-async fn access_range(range: BufferRange, buffer: &mut [u64], iterations: usize, rng: &mut SimpleRng) {
-    println!("Accessing range: {} - {}, iterations: {}", range.start, range.end, iterations);
-    for _ in 0..iterations {
-        let index = rng.next_usize(range.start..range.end);
-        buffer[index] = buffer[index].wrapping_add(1);
+#[derive(Debug)]
+struct BinaryTree {
+    root: Option<Box<TreeNode>>,
+    elapsed_time_ns: u128,
+}
+
+impl BinaryTree {
+    fn new() -> Self {
+        BinaryTree { root: None, elapsed_time_ns: 0 }
+    }
+
+    fn insert(&mut self, key: String, value: String) {
+        let start_time = Instant::now();
+        if let Some(ref mut root) = self.root {
+            root.insert(key, value);
+        } else {
+            self.root = Some(Box::new(TreeNode::new(key, value)));
+        }
+        let elapsed = start_time.elapsed().as_nanos();
+        self.elapsed_time_ns += elapsed;
     }
 }
 
+fn generate_random_string(rng: &mut impl Rng, length: usize) -> String {
+    (0..length)
+        .map(|_| rng.sample(rand::distributions::Alphanumeric) as char)
+        .collect()
+}
+
+use crate::cache_thrasher::CacheThrasher;
 #[tokio::main]
 async fn main() {
-    let range_sizes = [4 * 1024 / 8, 256 * 1024 / 8, 4 * 1024 * 1024 / 8, 128 * 1024 * 1024 / 8]; // Sizes in u64s
-    let iterations = 4_000_000;
-    let threads = 1;
+    //use tokio::runtime::Runtime;
 
-    let ranges = create_ranges(BUFFER_SIZE / 8, &range_sizes);
+    /*
+    #[tokio::test]
+    async fn test_binary_tree_insertion() {
+        let mut tree = BinaryTree::new();
+        let mut rng = rand::thread_rng();
 
-    // Measure latency for each range size
-    for &range in &ranges {
-        println!("Testing range: {} - {} ({} u64s)", range.start, range.end, range.end - range.start);
-
-        // Allocate buffers (256MB each)
-        let mut buffers: Vec<_> = (0..threads)
-            .map(|_| vec![0u64; BUFFER_SIZE / 8])
-            .collect();
-
-        let start_time = Instant::now();
-
-        // Spawn tasks
-        let mut tasks = Vec::new();
-        for mut buffer in buffers.drain(..) {
-            let range_clone = range;
-            let mut rng = SimpleRng::new(12345); // Seed the RNG
-            tasks.push(task::spawn(async move {
-                access_range(range_clone, &mut buffer, iterations / threads, &mut rng).await;
-            }));
+        for _ in 0..1_000_000 {
+            let key = generate_random_string(&mut rng, 10);
+            let value = generate_random_string(&mut rng, 20);
+            tree.insert(key, value);
         }
 
-        for t in tasks {
-            t.await.unwrap();
-        }
-
-        let elapsed = start_time.elapsed();
-        let total_accesses = iterations * threads;
-        let ns_per_access = elapsed.as_nanos() / total_accesses as u128;
-        println!("Range: {} - {} completed in {:?} ({} ns per access)", range.start, range.end, elapsed, ns_per_access);
+        println!("Time taken for 1M insertions {:?}", tree.elapsed_time_ns/1_000_000 );
     }
+    */
+
+    let mut tree = BinaryTree::new();
+    let mut rng = rand::thread_rng();
+    let thrasher = CacheThrasher::new(1 << 28, 2);
+    //let thrasher = CacheThrasher::new(1 << 12, 2);
+
+    thrasher.start();
+
+    let start_time = Instant::now();
+
+    for _ in 0..1_000_000 {
+        let key = generate_random_string(&mut rng, 10);
+        let value = generate_random_string(&mut rng, 20);
+        tree.insert(key, value);
+    }
+    thrasher.stop();
+
+    let elapsed = start_time.elapsed();
+    println!("Time taken for 1M insertions with cache thrasher: {:?}", elapsed.as_nanos() / 1_000_000);
 }
