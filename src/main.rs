@@ -6,12 +6,14 @@ use std::time::Instant;
 use arrayvec::ArrayVec;
 use nilsimsa;
 
+const HASH_SIZE: usize = 64; // Total number of bits in the hash
 const SEGMENT_SIZE: usize = 24; // Number of bits per segment
 const OVERLAP_SIZE: usize = 8; // Number of overlapping bits
-const NUM_SEGMENTS: usize = (64 - SEGMENT_SIZE) / (SEGMENT_SIZE - OVERLAP_SIZE) + 1; // Number of segments
+const NUM_SEGMENTS: usize = (HASH_SIZE - SEGMENT_SIZE) / (SEGMENT_SIZE - OVERLAP_SIZE) + 1; // Number of segments
+//const NUM_SEGMENTS: usize = (HASH_SIZE - OVERLAP_SIZE + SEGMENT_SIZE - OVERLAP_SIZE - 1) / (SEGMENT_SIZE - OVERLAP_SIZE); // Correct calculation for number of segments
 const NUM_STRINGS: usize = 1_000_000; // Number of random strings to generate
 const STRING_SIZE: usize = 128; // Size of each random string in bytes
-const INITIAL_VEC_CAPACITY: usize = 8;
+const INITIAL_VEC_CAPACITY: usize = 16;
 const BATCH_SIZE: u64 = 10_000;
 
 fn main() {
@@ -42,6 +44,24 @@ fn main() {
         let start = Instant::now();
         let segments = create_segments(hash);
         total_segment_time += start.elapsed().as_micros(); 
+
+        /* 
+           in REDIS, we would store it like this, using a pipeline
+           HSET id_segment:<0..24 bit field> <full_hash_value:64> <some_value_reputation>
+           HSET id_segment:<13-37 bit field> <full_hash_value:64> <some_value_reputation>
+           HSET id_segment:<26-49 bit field> <full_hash_value:64> <some_value_reputation>
+           HSET id_segment:<39-63 bit field> <full_hash_value:64> <some_value_reputation>
+
+           and to fetch the data, using a pipeline or HGETALL:
+           HGET id_segment:<0..24 bit field> <full_hash_value:64>
+           HGET id_segment:<13-37 bit field> <full_hash_value:64>
+           HGET id_segment:<26-49 bit field> <full_hash_value:64>
+           HGET id_segment:<39-63 bit field> <full_hash_value:64>
+
+           then use hamming distance on teh full hash values and see which one is < 4 distance 
+
+        */
+
 
         for (i, segment) in segments.iter().enumerate() {
             //let bucket_key = format!("bucket:{}:{}", i, segment);
@@ -104,12 +124,21 @@ fn stable_document_hash(input: &str) -> u64 {
     u64::from_str_radix(truncated_hex, 16).expect("Invalid hex from Nilsimsa")
 }
 
+//
+// XXX fix this, it really should be:
+// segments:
+// 0: 0-23
+// 1: 13-37
+// 2: 26-49
+// 3: 39-63
 fn create_segments(hash: u64) -> Vec<u32> {
     let mut segments = Vec::new();
 
-    for i in 0..NUM_SEGMENTS {
-        let shift = i * (SEGMENT_SIZE - OVERLAP_SIZE);
-        let segment = ((hash >> shift) & ((1 << SEGMENT_SIZE) - 1)) as u32;
+    // Define the start positions for each segment
+    let start_positions = [0, 13, 26, 39];
+
+    for &start in &start_positions {
+        let segment = ((hash >> start) & ((1 << SEGMENT_SIZE) - 1)) as u32;
         segments.push(segment);
     }
 
