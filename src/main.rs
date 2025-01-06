@@ -1,55 +1,118 @@
+use rand::seq::SliceRandom;
+use rand::thread_rng;
 use rand::Rng;
+use std::collections::HashSet;
 
-// Simulate the probability of fixation for each allele carrier in the population
-fn calculate_probability(allele_carriers: &Vec<u32>, k: u32, N: usize) -> f64 {
-    let carriers_with_all_alleles = allele_carriers.iter().filter(|&&x| x == k).count();
-    carriers_with_all_alleles as f64 / N as f64
+const NUM_ZYGOTES: usize = 50;
+const NUM_ALLELES: usize = 10; // Number of alleles
+const NUM_SIMULATIONS: usize = 1; // Run 100 simulations for averaging
+const SELECTION_PRESSURE: f64 = 0.10; // Selection pressure coefficient
+
+fn calculate_fitness(alleles: &HashSet<usize>) -> f64 {
+    // Calculate fitness based on the alleles present
+    // For simplicity, assume each allele contributes equally to fitness
+    alleles.len() as f64 * SELECTION_PRESSURE
+}
+fn initialize_population() -> Vec<HashSet<usize>> {
+    let mut rng = thread_rng();
+    let mut alleles: Vec<usize> = (0..NUM_ALLELES).collect();
+    alleles.shuffle(&mut rng);
+
+    let mut population = Vec::new();
+    for i in 0..NUM_ZYGOTES {
+        let zygote = if i < NUM_ALLELES {
+            let mut zygote = HashSet::new();
+            zygote.insert(alleles[i]);
+            zygote
+        } else {
+            HashSet::new()
+        };
+        population.push(zygote);
+    }
+    println!("Initial population: {:?}", population);
+    population
 }
 
-// Simulate the fixation process with selection pressure
-fn simulate_fixation_with_selection(N: usize, k: u32, initial_alleles: usize, s: f64) -> usize {
-    let mut rng = rand::thread_rng();
-    let mut allele_carriers = vec![1; initial_alleles]; // Initially, 10 zygotes with 1 allele each
-    allele_carriers.extend(vec![0; N - initial_alleles]); // Fill the rest with 0 alleles
+
+fn simulate_generation(population: &mut Vec<HashSet<usize>>) {
+    let mut rng = thread_rng();
+    let mut next_generation = Vec::new();
+    let mut max_alleles = 0;
+    let mut offspring_total_alleles:f64 = 0.0;
+    let mut most_diverse_offspring = HashSet::new();
+
+    // Shuffle the population to ensure random pairing without replacement
+    let mut shuffled_population = population.clone();
+    shuffled_population.shuffle(&mut rng);
+
+    // Iterate over the shuffled population in pairs
+    for pair in shuffled_population.chunks(2) {
+        //println!("Pair: {:?}", pair);
+        if pair.len() == 2 {
+            let (parent1, parent2) = (&pair[0], &pair[1]);
+            let fitness1 = calculate_fitness(&parent1);
+            let fitness2 = calculate_fitness(&parent2);
+
+            // Determine the number of offspring based on fitness
+            let num_offspring = (((fitness1 + fitness2) * 4.0) +1.5).round() as usize;
+
+            // Generate offspring for parent1
+            for _ in 0..num_offspring {
+                let mut offspring = HashSet::new();
+                let alleles_set: HashSet<_> = parent1.union(parent2).cloned().collect();
+
+                // Randomly select alleles to form a unique combination
+                for allele in alleles_set {
+                    if parent1.contains(&allele) && parent2.contains(&allele) {
+                        // If the allele is present in both parents, include it in the offspring
+                        offspring.insert(allele);
+                    } else if rng.gen_bool(0.5) {
+                        // If the allele is present in only one parent, include it with 50% probability
+                        offspring.insert(allele);
+                    }
+                }
+
+                offspring_total_alleles = offspring_total_alleles + offspring.len() as f64;
+
+                // Update the most diverse offspring if this one has more alleles
+                if offspring.len() > max_alleles {
+                    //println!("MAX ALLELES Offspring: {:?}", offspring);
+                    max_alleles = offspring.len();
+                    most_diverse_offspring = offspring.clone();
+                }
+
+                next_generation.push(offspring);
+            }
+
+        }
+    }
+
+    // Print the most diverse offspring of this generation
+    println!("Most diverse offspring in this generation: {:?}, average {}", most_diverse_offspring, offspring_total_alleles/(next_generation.len() as f64));
+
+    // Update the population for the next generation
+    *population = next_generation;
+}
+
+fn run_simulation() -> usize {
+    let mut population = initialize_population();
+
     let mut generations = 0;
 
-    // Simulate the generations until one zygote has all alleles
-    while calculate_probability(&allele_carriers, k, N) < 0.5 {
+    loop {
         generations += 1;
-        let mut new_allele_carriers = allele_carriers.clone();
 
-        // Reproduction and recombination with selection pressure
-        for i in 0..N {
-            if allele_carriers[i] == k {
-                continue; // Skip if the zygote already has all alleles
-            }
-            for j in (i + 1)..N {
-                if allele_carriers[j] == k {
-                    continue; // Skip if the zygote already has all alleles
-                }
+        // Print the generation number and population size
+        println!("Generation {}: Population size = {}", generations, population.len());
 
-                // Simulate recombination between zygotes in each generation with selection pressure
-                //let fitness_i = 1.0 + s * allele_carriers[i] as f64; // Selection pressure on i
-                //let fitness_j = 1.0 + s * allele_carriers[j] as f64; // Selection pressure on j
-                let fitness_i = 1.0 + (s * allele_carriers[i] as f64); // Selection pressure on i
-                let fitness_j = 1.0 + (s * allele_carriers[j] as f64); // Selection pressure on j
+        // Simulate a generation
+        simulate_generation(&mut population);
 
-
-                let recombination_prob = 1.0 / N as f64;
-                let combined_fitness_prob = fitness_i * fitness_j / (fitness_i + fitness_j);
-
-                if rng.gen::<f64>() < recombination_prob * combined_fitness_prob {
-                    let combined_alleles = (allele_carriers[i] + allele_carriers[j]).min(k);
-                    new_allele_carriers[i] = combined_alleles;
-                    new_allele_carriers[j] = combined_alleles;
-                }
-            }
+        // Check if any zygote has all alleles
+        if population.iter().any(|zygote| zygote.len() == NUM_ALLELES) {
+            break;
         }
-
-        allele_carriers = new_allele_carriers;
-
-        // Check if fixation has been achieved (at least one zygote with all alleles)
-        if calculate_probability(&allele_carriers, k, N) >= 0.5 {
+        if generations > 30 {
             break;
         }
     }
@@ -58,20 +121,12 @@ fn simulate_fixation_with_selection(N: usize, k: u32, initial_alleles: usize, s:
 }
 
 fn main() {
-    let N = 50; // Population size
-    let k = 10; // Number of alleles
-    let initial_alleles = 10; // Number of zygotes initially carrying one allele each
-    let s = 0.1; // Selection coefficient (how much selection favors certain alleles)
-    let trials = 100; // Number of Monte Carlo trials
-
     let mut total_generations = 0;
 
-    // Run Monte Carlo simulations with selection and accumulate results
-    for _ in 0..trials {
-        total_generations += simulate_fixation_with_selection(N, k, initial_alleles, s);
+    for _ in 0..NUM_SIMULATIONS {
+        total_generations += run_simulation();
     }
 
-    // Calculate average generations for fixation
-    let average_generations = total_generations as f64 / trials as f64;
-    println!("Average generations for fixation with selection: {:.2}", average_generations);
+    let average_generations = total_generations / NUM_SIMULATIONS;
+    println!("Average generations to fixation: {}", average_generations);
 }
