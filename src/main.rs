@@ -6,7 +6,10 @@ use std::collections::HashSet;
 const NUM_ZYGOTES: usize = 50;
 const NUM_ALLELES: usize = 10; // Number of alleles
 const NUM_SIMULATIONS: usize = 1; // Run 100 simulations for averaging
-const SELECTION_PRESSURE: f64 = 0.10; // Selection pressure coefficient
+const SELECTION_PRESSURE: f64 = 0.20; // Selection pressure coefficient
+const ECOSYSTEM_LIMIT: usize = 4000; // Define the ecosystem limit
+const MAX_GENERATIONS: usize = 100; // Maximum number of generations
+
 
 fn calculate_fitness(alleles: &HashSet<usize>) -> f64 {
     // Calculate fitness based on the alleles present
@@ -54,7 +57,10 @@ fn simulate_generation(population: &mut Vec<HashSet<usize>>) {
             let fitness2 = calculate_fitness(&parent2);
 
             // Determine the number of offspring based on fitness
-            let num_offspring = (((fitness1 + fitness2) * 4.0) +1.5).round() as usize;
+            //let num_offspring = (((fitness1 + fitness2) * 4.0) +1.5).round() as usize;
+            // Adjust the number of offspring based on the total population
+            let population_factor = 1.0 - (population.len() as f64 / ECOSYSTEM_LIMIT as f64);
+            let num_offspring = (((fitness1 + fitness2) * 4.0 * population_factor) + 1.5).round() as usize;
 
             // Generate offspring for parent1
             for _ in 0..num_offspring {
@@ -112,7 +118,7 @@ fn run_simulation() -> usize {
         if population.iter().any(|zygote| zygote.len() == NUM_ALLELES) {
             break;
         }
-        if generations > 30 {
+        if generations > MAX_GENERATIONS {
             break;
         }
     }
