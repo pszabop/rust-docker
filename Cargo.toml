@@ -1,5 +1,5 @@
 [package]
-name = "garnet-bug-repro"
+name = "hash-correctness"
 version = "1.0.0"
 authors = ["Paul Szabo <paul@umlss.com>"]
 edition = "2018"
@@ -26,6 +26,6 @@ rand = "^0.8"
 xxhash-rust = { version = "^0.8", features = ["xxh32", "xxh3"]}
 tlsh = "*"
 ffuzzy = "0.3.12"
-nilsimsa = "0.2.0"
+nilsimsa = { git = "https://github.com/pszabop/nilsimsa.git", branch = "stable-fix" }
 
 [dev-dependencies]

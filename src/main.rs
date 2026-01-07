@@ -11,19 +11,26 @@ use nilsimsa;
     */
 fn main() {
     // Read the contents of the JSON files as strings
-    let first_long = fs::read_to_string("chrome_values.json")
+    let chrome_long = fs::read_to_string("chrome_values.json")
         .expect("Unable to read file chrome_values.json");
-    let second_long = fs::read_to_string("firefox_values.json")
+    let firefox_long = fs::read_to_string("firefox_values.json")
         .expect("Unable to read file firefox_values.json");
 
-    // Call the function to output the hashes and other results
-    let first_hash = stable_document_hash(&first_long);
-    let second_hash = stable_document_hash(&second_long);
-    output_results(first_hash, second_hash);
+    println!("---- chrome and firefox ----");
+    let chrome_hash = stable_document_hash(&chrome_long);
+    let firefox_hash = stable_document_hash(&firefox_long);
+    output_results(chrome_hash, firefox_hash);
 
-    let modified_string = randomly_modify_string(&first_long, 10);
-    let modified_hash = stable_document_hash(&modified_string);
-    output_results(first_hash, modified_hash);
+    println!("---- modified chrome with 10 random changes ----");
+    let modified_chrome_string = randomly_modify_string(&chrome_long, 10);
+    let modified_chrome_hash = stable_document_hash(&modified_chrome_string);
+    output_results(chrome_hash, modified_chrome_hash);
+
+    println!("---- modified firefox with 80 random ----");
+    let modified_firefox_string = randomly_modify_string(&firefox_long, 200);
+    let modified_firefox_hash = stable_document_hash(&modified_firefox_string);
+    output_results(firefox_hash, modified_firefox_hash);
+
 }
 
 
@@ -227,8 +234,15 @@ fn stable_document_hash0(doc: &str) -> u64 {
     return simhash::simhash(doc);
 }
 
+
+/// Compute Hamming distance (number of differing bits)
+pub fn hamming_distance(first: u64, second: u64) -> u32 {
+    (first^ second).count_ones()
+}
+
 fn output_results(h: u64, i: u64) {
-    let bithamming = simhash::hamming_distance(h, i);
+    //let bithamming = simhash::hamming_distance(h, i);
+    let bithamming = hamming_distance(h,i);
     let distance = simhash::hash_similarity(h, i);
     println!("Hamming distance: {}, float distance: {}", bithamming, distance);
 
