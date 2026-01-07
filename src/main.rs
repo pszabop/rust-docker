@@ -1,14 +1,8 @@
 #![allow(dead_code)]
 use rand::Rng;
-use simhash;
 use std::fs;
-use xxhash_rust::xxh3::xxh3_64; // Example 32-bit hash
-use std::cmp::min;
-use ssdeep;
-use nilsimsa;
+use plotters::prelude::*;
 
-/* 
-    */
 fn main() {
     // Read the contents of the JSON files as strings
     let chrome_long = fs::read_to_string("chrome_values.json")
@@ -16,23 +10,273 @@ fn main() {
     let firefox_long = fs::read_to_string("firefox_values.json")
         .expect("Unable to read file firefox_values.json");
 
-    println!("---- chrome and firefox ----");
+    // Show baseline comparison
+    println!("=== Baseline: Chrome vs Firefox ===");
     let chrome_hash = stable_document_hash(&chrome_long);
     let firefox_hash = stable_document_hash(&firefox_long);
-    output_results(chrome_hash, firefox_hash);
+    let baseline_distance = hamming_distance(chrome_hash, firefox_hash);
+    println!("Chrome hash:  {:016x}", chrome_hash);
+    println!("Firefox hash: {:016x}", firefox_hash);
+    println!("Hamming distance between Chrome and Firefox: {}\n", baseline_distance);
 
-    println!("---- modified chrome with 10 random changes ----");
-    let modified_chrome_string = randomly_modify_string(&chrome_long, 10);
-    let modified_chrome_hash = stable_document_hash(&modified_chrome_string);
-    output_results(chrome_hash, modified_chrome_hash);
+    // Configuration
+    const NUM_TRIALS: usize = 100;
+    const MAX_MODIFICATIONS: usize = 200;
 
-    println!("---- modified firefox with 80 random ----");
-    let modified_firefox_string = randomly_modify_string(&firefox_long, 200);
-    let modified_firefox_hash = stable_document_hash(&modified_firefox_string);
-    output_results(firefox_hash, modified_firefox_hash);
+    println!("=== Running Statistical Analysis ===");
+    println!("Trials per modification count: {}", NUM_TRIALS);
+    println!("Max modifications: {}\n", MAX_MODIFICATIONS);
 
+    // Run analysis for both signatures
+    let chrome_stats = run_analysis(&chrome_long, NUM_TRIALS, MAX_MODIFICATIONS, "Chrome");
+    let firefox_stats = run_analysis(&firefox_long, NUM_TRIALS, MAX_MODIFICATIONS, "Firefox");
+
+    // Print results table
+    print_results_table(&chrome_stats, &firefox_stats);
+
+    // Generate PNG graphs
+    generate_mean_plot(&chrome_stats, &firefox_stats, "hamming_distance_mean.png")
+        .expect("Failed to generate mean plot");
+    generate_stdev_plot(&chrome_stats, &firefox_stats, "hamming_distance_stdev.png")
+        .expect("Failed to generate stdev plot");
+    generate_combined_plot(&chrome_stats, &firefox_stats, "hamming_distance_combined.png")
+        .expect("Failed to generate combined plot");
+
+    println!("\nGenerated PNG files:");
+    println!("  - hamming_distance_mean.png");
+    println!("  - hamming_distance_stdev.png");
+    println!("  - hamming_distance_combined.png");
 }
 
+#[derive(Clone)]
+struct Stats {
+    num_modifications: usize,
+    mean: f64,
+    stdev: f64,
+    min: u32,
+    max: u32,
+}
+
+fn run_analysis(input: &str, num_trials: usize, max_mods: usize, name: &str) -> Vec<Stats> {
+    println!("Analyzing {} signature...", name);
+    let original_hash = stable_document_hash(input);
+    let mut results = Vec::with_capacity(max_mods);
+
+    for num_mods in 1..=max_mods {
+        let mut distances: Vec<u32> = Vec::with_capacity(num_trials);
+
+        for _ in 0..num_trials {
+            let modified = randomly_modify_string(input, num_mods);
+            let modified_hash = stable_document_hash(&modified);
+            let dist = hamming_distance(original_hash, modified_hash);
+            distances.push(dist);
+        }
+
+        let mean = distances.iter().map(|&d| d as f64).sum::<f64>() / num_trials as f64;
+        let variance = distances.iter().map(|&d| (d as f64 - mean).powi(2)).sum::<f64>() / num_trials as f64;
+        let stdev = variance.sqrt();
+        let min = *distances.iter().min().unwrap();
+        let max = *distances.iter().max().unwrap();
+
+        results.push(Stats { num_modifications: num_mods, mean, stdev, min, max });
+
+        // Progress indicator every 20 modifications
+        if num_mods % 20 == 0 {
+            println!("  {} modifications: mean={:.2}, stdev={:.2}", num_mods, mean, stdev);
+        }
+    }
+
+    println!("  Done.\n");
+    results
+}
+
+fn print_results_table(chrome_stats: &[Stats], firefox_stats: &[Stats]) {
+    println!("=== Results Summary (selected points) ===");
+    println!("{:>8} | {:>12} {:>8} | {:>12} {:>8} | {:>8}",
+             "Mods", "Chrome Mean", "StdDev", "Firefox Mean", "StdDev", "Diff");
+    println!("{}", "-".repeat(75));
+
+    // Print at key points: 1, 5, 10, 20, 40, 60, 80, 100, 150, 200
+    let key_points = [1, 5, 10, 20, 40, 60, 80, 100, 150, 200];
+
+    for &n in &key_points {
+        if n <= chrome_stats.len() {
+            let c = &chrome_stats[n - 1];
+            let f = &firefox_stats[n - 1];
+            let diff = (c.mean - f.mean).abs();
+            println!("{:>8} | {:>12.2} {:>8.2} | {:>12.2} {:>8.2} | {:>8.2}",
+                     n, c.mean, c.stdev, f.mean, f.stdev, diff);
+        }
+    }
+
+    // Find threshold crossings (when mean hamming distance crosses 1, 2, 3, ... 16)
+    println!("\n=== Hamming Distance Threshold Crossings ===");
+    println!("{:>10} | {:>15} | {:>15}", "Threshold", "Chrome (mods)", "Firefox (mods)");
+    println!("{}", "-".repeat(50));
+
+    for threshold in 1..=16 {
+        let chrome_cross = find_threshold_crossing(chrome_stats, threshold as f64);
+        let firefox_cross = find_threshold_crossing(firefox_stats, threshold as f64);
+
+        let chrome_str = chrome_cross.map_or("N/A".to_string(), |v| v.to_string());
+        let firefox_str = firefox_cross.map_or("N/A".to_string(), |v| v.to_string());
+
+        println!("{:>10} | {:>15} | {:>15}", threshold, chrome_str, firefox_str);
+    }
+}
+
+fn find_threshold_crossing(stats: &[Stats], threshold: f64) -> Option<usize> {
+    for s in stats {
+        if s.mean >= threshold {
+            return Some(s.num_modifications);
+        }
+    }
+    None
+}
+
+fn generate_mean_plot(chrome: &[Stats], firefox: &[Stats], filename: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let root = BitMapBackend::new(filename, (800, 600)).into_drawing_area();
+    root.fill(&WHITE)?;
+
+    let max_x = chrome.len() as f64;
+    let max_y = chrome.iter().chain(firefox.iter()).map(|s| s.mean).fold(0.0_f64, f64::max) * 1.1;
+
+    let mut chart = ChartBuilder::on(&root)
+        .caption("Mean Hamming Distance vs Character Modifications", ("sans-serif", 24))
+        .margin(10)
+        .x_label_area_size(40)
+        .y_label_area_size(50)
+        .build_cartesian_2d(0.0..max_x, 0.0..max_y)?;
+
+    chart.configure_mesh()
+        .x_desc("Number of Random Character Modifications")
+        .y_desc("Mean Hamming Distance")
+        .draw()?;
+
+    // Chrome line
+    chart.draw_series(LineSeries::new(
+        chrome.iter().map(|s| (s.num_modifications as f64, s.mean)),
+        &BLUE,
+    ))?.label("Chrome").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &BLUE));
+
+    // Firefox line
+    chart.draw_series(LineSeries::new(
+        firefox.iter().map(|s| (s.num_modifications as f64, s.mean)),
+        &RED,
+    ))?.label("Firefox").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &RED));
+
+    chart.configure_series_labels()
+        .background_style(&WHITE.mix(0.8))
+        .border_style(&BLACK)
+        .draw()?;
+
+    root.present()?;
+    Ok(())
+}
+
+fn generate_stdev_plot(chrome: &[Stats], firefox: &[Stats], filename: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let root = BitMapBackend::new(filename, (800, 600)).into_drawing_area();
+    root.fill(&WHITE)?;
+
+    let max_x = chrome.len() as f64;
+    let max_y = chrome.iter().chain(firefox.iter()).map(|s| s.stdev).fold(0.0_f64, f64::max) * 1.1;
+
+    let mut chart = ChartBuilder::on(&root)
+        .caption("Std Dev of Hamming Distance vs Character Modifications", ("sans-serif", 24))
+        .margin(10)
+        .x_label_area_size(40)
+        .y_label_area_size(50)
+        .build_cartesian_2d(0.0..max_x, 0.0..max_y)?;
+
+    chart.configure_mesh()
+        .x_desc("Number of Random Character Modifications")
+        .y_desc("Standard Deviation")
+        .draw()?;
+
+    chart.draw_series(LineSeries::new(
+        chrome.iter().map(|s| (s.num_modifications as f64, s.stdev)),
+        &BLUE,
+    ))?.label("Chrome").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &BLUE));
+
+    chart.draw_series(LineSeries::new(
+        firefox.iter().map(|s| (s.num_modifications as f64, s.stdev)),
+        &RED,
+    ))?.label("Firefox").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &RED));
+
+    chart.configure_series_labels()
+        .background_style(&WHITE.mix(0.8))
+        .border_style(&BLACK)
+        .draw()?;
+
+    root.present()?;
+    Ok(())
+}
+
+fn generate_combined_plot(chrome: &[Stats], firefox: &[Stats], filename: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let root = BitMapBackend::new(filename, (1000, 600)).into_drawing_area();
+    root.fill(&WHITE)?;
+
+    let max_x = chrome.len() as f64;
+    let max_y = chrome.iter().chain(firefox.iter()).map(|s| s.mean + 2.0 * s.stdev).fold(0.0_f64, f64::max) * 1.1;
+
+    let mut chart = ChartBuilder::on(&root)
+        .caption("Hamming Distance vs Character Modifications (mean ± 2σ)", ("sans-serif", 24))
+        .margin(10)
+        .x_label_area_size(40)
+        .y_label_area_size(50)
+        .build_cartesian_2d(0.0..max_x, 0.0..max_y)?;
+
+    chart.configure_mesh()
+        .x_desc("Number of Random Character Modifications")
+        .y_desc("Hamming Distance")
+        .draw()?;
+
+    // Chrome error band (draw bands first, then lines on top) - ±2σ, floor at 0
+    let chrome_band: Vec<_> = chrome.iter()
+        .map(|s| (s.num_modifications as f64, (s.mean - 2.0 * s.stdev).max(0.0), s.mean + 2.0 * s.stdev))
+        .collect();
+    chart.draw_series(chrome_band.iter().map(|(x, lo, hi)| {
+        Rectangle::new([(*x - 0.5, *lo), (*x + 0.5, *hi)], BLUE.mix(0.2).filled())
+    }))?;
+
+    // Firefox error band - ±2σ, floor at 0
+    let firefox_band: Vec<_> = firefox.iter()
+        .map(|s| (s.num_modifications as f64, (s.mean - 2.0 * s.stdev).max(0.0), s.mean + 2.0 * s.stdev))
+        .collect();
+    chart.draw_series(firefox_band.iter().map(|(x, lo, hi)| {
+        Rectangle::new([(*x - 0.5, *lo), (*x + 0.5, *hi)], RED.mix(0.2).filled())
+    }))?;
+
+    // Chrome mean line
+    chart.draw_series(LineSeries::new(
+        chrome.iter().map(|s| (s.num_modifications as f64, s.mean)),
+        BLUE.stroke_width(2),
+    ))?.label("Chrome (mean ± 2σ)").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &BLUE));
+
+    // Firefox mean line
+    chart.draw_series(LineSeries::new(
+        firefox.iter().map(|s| (s.num_modifications as f64, s.mean)),
+        RED.stroke_width(2),
+    ))?.label("Firefox (mean ± 2σ)").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &RED));
+
+    // Horizontal lines for hamming thresholds
+    for threshold in [8, 16, 24, 32].iter() {
+        if (*threshold as f64) < max_y {
+            chart.draw_series(LineSeries::new(
+                [(0.0, *threshold as f64), (max_x, *threshold as f64)],
+                BLACK.stroke_width(1),
+            ))?;
+        }
+    }
+
+    chart.configure_series_labels()
+        .background_style(&WHITE.mix(0.8))
+        .border_style(&BLACK)
+        .draw()?;
+
+    root.present()?;
+    Ok(())
+}
 
 fn stable_document_hash(input: &str) -> u64 {
     let mut hasher = nilsimsa::Nilsimsa::new();
@@ -43,222 +287,10 @@ fn stable_document_hash(input: &str) -> u64 {
     u64::from_str_radix(truncated_hex, 16).expect("Invalid hex from Nilsimsa")
 }
 
-fn stable_document_hash6(input: &str) -> u64 {
-    weighted_bit_count_hash(input, 8)
-}
-
-fn weighted_bit_count_hash(input: &str, chunk_size: usize) -> u64 {
-    let mut bit_counts = [0i32; 64];
-    let chunks: Vec<&str> = input.split(',').collect();
-
-    for chunk in chunks {
-        let chunk_hash = xxh3_64(chunk.as_bytes());
-
-        for bit_pos in 0..64 {
-            if (chunk_hash & (1 << bit_pos)) != 0 {
-                bit_counts[bit_pos] += 1;
-            } else {
-                bit_counts[bit_pos] -= 1;
-            }
-        }
-    }
-
-    let mut result = 0u64;
-    for bit_pos in 0..64 {
-        if bit_counts[bit_pos] >= 0 {
-            result |= 1 << bit_pos;
-        }
-    }
-
-    result
-}
-
-/*
-fn main() {
-    let first_long = fs::read_to_string("chrome_values.json")
-        .expect("Unable to read file chrome_values.json");
-    println!("{:?}", ssdeep::hash_buf(&first_long.as_bytes()));
-    let modified_string = randomly_modify_string(&first_long, 10);
-    println!("{:?}", ssdeep::hash_buf(&modified_string.as_bytes()));
-}
-    */
-
-
-
-// this one sucks worse than simhash itself
-use tlsh::{Tlsh, Version, BucketKind, ChecksumKind, TlshBuilder};
-fn stable_document_hash5(input: &str) -> u64 {
-    let mut builder = TlshBuilder::new(
-        BucketKind::Bucket128,
-        ChecksumKind::OneByte,
-        tlsh::Version::Version4,
-     );
-     builder.update(input.as_bytes());
-     let tlsh = builder.build().unwrap();
-         // `tlsh.hash()` returns a hex-encoded string; take the first 16 hex digits for 64 bits
-    let hex_str = tlsh.hash();
-    println!("TLSH: {}", hex_str);
-    let truncated_hex = &hex_str[24..40]; // 16 hex digits = 64 bits
-    u64::from_str_radix(truncated_hex, 16).expect("Invalid hex from TLSH")
-}
-
-
-fn stable_document_hash4(input: &str) -> u64 {
-    stable_fuzzy_hash(input, 4)
-}
-
-/// Fuzzy hash that remains nearly the same if only a few characters change.
-/// allegedyl
-fn stable_fuzzy_hash(input: &str, chunk_size: usize) -> u64 {
-    // We'll accumulate bit counts for 64 bits
-    let mut bit_counts = [0i32; 64];
-
-    // Split the input into fixed-size chunks
-    let bytes = input.as_bytes();
-    let mut start = 0;
-    while start < bytes.len() {
-        let end = min(start + chunk_size, bytes.len());
-        let chunk = &bytes[start..end];
-
-        // Hash this chunk to 64 bits
-        let chunk_hash = xxh3_64(chunk);
-
-        // For each bit in the chunk hash, increment or decrement the counter
-        for bit_pos in 0..64 {
-            if (chunk_hash & (1 << bit_pos)) != 0 {
-                bit_counts[bit_pos] += 1;
-            } else {
-                bit_counts[bit_pos] -= 1;
-            }
-        }
-
-        start += chunk_size;
-    }
-
-    // Construct final 64-bit hash: if count >= 0, set bit
-    let mut result = 0u64;
-    for bit_pos in 0..64 {
-        if bit_counts[bit_pos] >= 0 {
-            result |= 1 << bit_pos;
-        }
-    }
-
-    result
-}
-
-/*
-fn stable_document_hash3(input: &str) -> u64 {
-    chunked_simhash(input, Some(8))
-}
-fn chunked_simhash(input: &str, chunk_size: Option<usize>) -> u64 {
-    let size = chunk_size.unwrap_or(8);
-    let mut combined_hash = 0u64;
-    let len = input.len();
-    let mut start = 0;
-
-    while start < len {
-        let end = std::cmp::min(start + size, len);
-        let chunk_str = &input[start..end];
-        let chunk_hash = simhash::simhash(&chunk_str);
-        combined_hash ^= chunk_hash;
-        start += size;
-    }
-
-    combined_hash
-}
-    */
-fn stable_document_hash2(input: &str) -> u64 {
-    const BASE: u64 = 257;  // Base for rolling hash
-    const MOD: u64 = (1 << 61) - 1; // Large prime modulus
-    const MASK_LOWER: u64 = 0xFFFFFFFF; // Mask for lower 32 bits
-
-    let mut upper: u64 = 0; // Stable upper bits
-    let mut lower: u64 = 0; // Volatile lower bits
-    let mut base_pow: u64 = 1;
-
-    for (i, &byte) in input.as_bytes().iter().enumerate() {
-        let byte_val = byte as u64;
-
-        // Update upper: weighted by position to favor stability
-        upper = upper
-            .wrapping_add(byte_val.wrapping_mul(base_pow % MOD))
-            .wrapping_rem(MOD);
-
-        // Update lower: sensitive to individual bytes
-        lower = lower
-            .wrapping_add(byte_val.wrapping_mul((i as u64 + 1)))
-            .wrapping_rem(MOD);
-
-        // Update base power for next round
-        base_pow = base_pow.wrapping_mul(BASE).wrapping_rem(MOD);
-    }
-
-    // Combine upper and lower
-    (upper & !MASK_LOWER) | (lower & MASK_LOWER)
-}
-
-
-fn stable_document_hash1(doc: &str) -> u64 {
-    // Break the document into 16-byte chunks
-    let chunk_size = 16;
-    let bytes = doc.as_bytes();
-    let mut bit_counts = [0i32; 64];
-
-    // For each chunk, compute 32-bit hash, then spread bits into a 64-bit pattern
-    for chunk_start in (0..bytes.len()).step_by(chunk_size) {
-        let chunk_end = min(chunk_start + chunk_size, bytes.len());
-        let hash_32 = xxh3_64(&bytes[chunk_start..chunk_end]) as u64;
-
-        // For each bit, increment or decrement
-        for bit_pos in 0..32 {
-            if (hash_32 & (1 << bit_pos)) != 0 {
-                bit_counts[bit_pos as usize] += 1;
-            } else {
-                bit_counts[bit_pos as usize] -= 1;
-            }
-        }
-    }
-
-    // Combine bits to produce a final 64-bit value (top 32 bits will remain zeroed)
-    let mut result = 0u64;
-    for bit_pos in 0..64 {
-        if bit_pos < 32 && bit_counts[bit_pos] >= 0 {
-            result |= 1 << bit_pos;
-        }
-    }
-
-    result
-}
-
-fn stable_document_hash0(doc: &str) -> u64 {
-    return simhash::simhash(doc);
-}
-
-
 /// Compute Hamming distance (number of differing bits)
 pub fn hamming_distance(first: u64, second: u64) -> u32 {
-    (first^ second).count_ones()
+    (first ^ second).count_ones()
 }
-
-fn output_results(h: u64, i: u64) {
-    //let bithamming = simhash::hamming_distance(h, i);
-    let bithamming = hamming_distance(h,i);
-    let distance = simhash::hash_similarity(h, i);
-    println!("Hamming distance: {}, float distance: {}", bithamming, distance);
-
-    println!("{:<64} {:<16}", "Binary (64 bits)", "Hexadecimal (16 hex digits)");
-    println!("{:<64} {:<16}", format!("{:064b}", h), format!("{:016x}", h));
-    println!("{:<64} {:<16}", format!("{:064b}", i), format!("{:016x}", i));
-}
-
-fn output_results128(h: u128, i: u128) {
-    //println!("Hamming distance: {}, float distance: {}", bithamming, distance);
-
-    println!("{:<128} {:<16}", "Binary (64 bits)", "Hexadecimal (16 hex digits)");
-    println!("{:<128} {:<16}", format!("{:128b}", h), format!("{:032x}", h));
-    println!("{:<128} {:<16}", format!("{:128b}", i), format!("{:032x}", i));
-}
-
 
 fn randomly_modify_string(input: &str, n: usize) -> String {
     let mut rng = rand::thread_rng();

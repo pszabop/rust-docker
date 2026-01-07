@@ -27,5 +27,6 @@ xxhash-rust = { version = "^0.8", features = ["xxh32", "xxh3"]}
 tlsh = "*"
 ffuzzy = "0.3.12"
 nilsimsa = { git = "https://github.com/pszabop/nilsimsa.git", branch = "stable-fix" }
+plotters = "0.3.7"
 
 [dev-dependencies]
