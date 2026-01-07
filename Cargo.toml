@@ -25,7 +25,7 @@ rand = "^0.8"
 xxhash-rust = { version = "^0.8", features = ["xxh32", "xxh3"]}
 tlsh = "*"
 ffuzzy = "0.3.12"
-nilsimsa = "0.2.0"
+nilsimsa = { git = "https://github.com/pszabop/nilsimsa.git", branch = "stable-fix" }
 arrayvec = "^0.7"
 
 
