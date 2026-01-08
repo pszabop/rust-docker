@@ -102,6 +102,44 @@ fn main() {
     let word_limit_256 = find_discrimination_limit(&word_chrome_256, &word_firefox_256, baseline_256);
     println!("Safe limit (256-bit, words): ~{} chars\n", word_limit_256);
 
+    // ==================== RANDOM INSERTION TEST ====================
+    println!("============================================================");
+    println!("=== TEST 3: RANDOM INSERTIONS ===");
+    println!("============================================================\n");
+
+    println!("--- 64-bit Random Insert ---");
+    let insert_chrome_64 = run_analysis(&chrome_long, NUM_TRIALS, &mod_counts, "Chrome", ModType::Insert, HashSize::Bit64);
+    let insert_firefox_64 = run_analysis(&firefox_long, NUM_TRIALS, &mod_counts, "Firefox", ModType::Insert, HashSize::Bit64);
+    print_results_table(&insert_chrome_64, &insert_firefox_64, baseline_64);
+    let insert_limit_64 = find_discrimination_limit(&insert_chrome_64, &insert_firefox_64, baseline_64);
+    println!("Safe limit (64-bit, insert): ~{} chars\n", insert_limit_64);
+
+    println!("--- 256-bit Random Insert ---");
+    let insert_chrome_256 = run_analysis(&chrome_long, NUM_TRIALS, &mod_counts, "Chrome", ModType::Insert, HashSize::Bit256);
+    let insert_firefox_256 = run_analysis(&firefox_long, NUM_TRIALS, &mod_counts, "Firefox", ModType::Insert, HashSize::Bit256);
+    print_results_table(&insert_chrome_256, &insert_firefox_256, baseline_256);
+    let insert_limit_256 = find_discrimination_limit(&insert_chrome_256, &insert_firefox_256, baseline_256);
+    println!("Safe limit (256-bit, insert): ~{} chars\n", insert_limit_256);
+
+    // ==================== RANDOM REMOVAL TEST ====================
+    println!("============================================================");
+    println!("=== TEST 4: RANDOM REMOVALS ===");
+    println!("============================================================\n");
+
+    println!("--- 64-bit Random Remove ---");
+    let remove_chrome_64 = run_analysis(&chrome_long, NUM_TRIALS, &mod_counts, "Chrome", ModType::Remove, HashSize::Bit64);
+    let remove_firefox_64 = run_analysis(&firefox_long, NUM_TRIALS, &mod_counts, "Firefox", ModType::Remove, HashSize::Bit64);
+    print_results_table(&remove_chrome_64, &remove_firefox_64, baseline_64);
+    let remove_limit_64 = find_discrimination_limit(&remove_chrome_64, &remove_firefox_64, baseline_64);
+    println!("Safe limit (64-bit, remove): ~{} chars\n", remove_limit_64);
+
+    println!("--- 256-bit Random Remove ---");
+    let remove_chrome_256 = run_analysis(&chrome_long, NUM_TRIALS, &mod_counts, "Chrome", ModType::Remove, HashSize::Bit256);
+    let remove_firefox_256 = run_analysis(&firefox_long, NUM_TRIALS, &mod_counts, "Firefox", ModType::Remove, HashSize::Bit256);
+    print_results_table(&remove_chrome_256, &remove_firefox_256, baseline_256);
+    let remove_limit_256 = find_discrimination_limit(&remove_chrome_256, &remove_firefox_256, baseline_256);
+    println!("Safe limit (256-bit, remove): ~{} chars\n", remove_limit_256);
+
     // ==================== SUMMARY ====================
     println!("============================================================");
     println!("=== SUMMARY ===");
@@ -109,24 +147,23 @@ fn main() {
     println!("                    64-bit      256-bit");
     println!("Random Letters:     ~{:<6}     ~{:<6} chars", letter_limit_64, letter_limit_256);
     println!("Random Words:       ~{:<6}     ~{:<6} chars", word_limit_64, word_limit_256);
-    if word_limit_64 > letter_limit_64 || word_limit_256 > letter_limit_256 {
-        println!("\n=> Word changes show LOCALITY BENEFIT (more tolerant of concentrated changes)");
-    } else if word_limit_64 < letter_limit_64 || word_limit_256 < letter_limit_256 {
-        println!("\n=> Letter changes show better tolerance (no locality benefit)");
-    } else {
-        println!("\n=> No significant difference (nilsimsa treats both similarly)");
-    }
+    println!("Random Inserts:     ~{:<6}     ~{:<6} chars", insert_limit_64, insert_limit_256);
+    println!("Random Removes:     ~{:<6}     ~{:<6} chars", remove_limit_64, remove_limit_256);
 
     // Generate comparison plots
-    generate_comparison_plot(
+    generate_all_comparison_plot(
         &letter_chrome_64, &letter_firefox_64,
         &word_chrome_64, &word_firefox_64,
+        &insert_chrome_64, &insert_firefox_64,
+        &remove_chrome_64, &remove_firefox_64,
         baseline_64, "discrimination_64bit.png", 64
     ).expect("Failed to generate 64-bit plot");
 
-    generate_comparison_plot(
+    generate_all_comparison_plot(
         &letter_chrome_256, &letter_firefox_256,
         &word_chrome_256, &word_firefox_256,
+        &insert_chrome_256, &insert_firefox_256,
+        &remove_chrome_256, &remove_firefox_256,
         baseline_256, "discrimination_256bit.png", 256
     ).expect("Failed to generate 256-bit plot");
 
@@ -134,7 +171,7 @@ fn main() {
 }
 
 #[derive(Clone, Copy)]
-enum ModType { Letter, Word }
+enum ModType { Letter, Word, Insert, Remove }
 
 #[derive(Clone, Copy)]
 enum HashSize { Bit64, Bit256 }
@@ -148,7 +185,12 @@ struct Stats {
 
 fn run_analysis(input: &str, num_trials: usize, mod_counts: &[usize], name: &str,
                 mod_type: ModType, hash_size: HashSize) -> Vec<Stats> {
-    let type_str = match mod_type { ModType::Letter => "letter", ModType::Word => "word" };
+    let type_str = match mod_type {
+        ModType::Letter => "letter",
+        ModType::Word => "word",
+        ModType::Insert => "insert",
+        ModType::Remove => "remove",
+    };
     println!("  Analyzing {} ({})...", name, type_str);
 
     let mut results = Vec::with_capacity(mod_counts.len());
@@ -160,6 +202,8 @@ fn run_analysis(input: &str, num_trials: usize, mod_counts: &[usize], name: &str
             let modified = match mod_type {
                 ModType::Letter => randomly_modify_letters(input, target_chars),
                 ModType::Word => randomly_modify_words(input, target_chars),
+                ModType::Insert => randomly_insert_chars(input, target_chars),
+                ModType::Remove => randomly_remove_chars(input, target_chars),
             };
 
             let dist = match hash_size {
@@ -212,9 +256,11 @@ fn find_discrimination_limit(chrome: &[Stats], firefox: &[Stats], baseline: u32)
     chrome.last().unwrap().num_modifications
 }
 
-fn generate_comparison_plot(
+fn generate_all_comparison_plot(
     letter_chrome: &[Stats], letter_firefox: &[Stats],
     word_chrome: &[Stats], word_firefox: &[Stats],
+    insert_chrome: &[Stats], insert_firefox: &[Stats],
+    remove_chrome: &[Stats], remove_firefox: &[Stats],
     baseline: u32, filename: &str, bits: u32
 ) -> Result<(), Box<dyn std::error::Error>> {
     let root = BitMapBackend::new(filename, (1000, 800)).into_drawing_area();
@@ -225,12 +271,14 @@ fn generate_comparison_plot(
     // Calculate max Y from all data
     let all_combined: Vec<f64> = letter_chrome.iter().zip(letter_firefox.iter())
         .chain(word_chrome.iter().zip(word_firefox.iter()))
+        .chain(insert_chrome.iter().zip(insert_firefox.iter()))
+        .chain(remove_chrome.iter().zip(remove_firefox.iter()))
         .map(|(c, f)| (c.mean + 2.0 * c.stdev) + (f.mean + 2.0 * f.stdev))
         .collect();
     let max_y = all_combined.iter().cloned().fold(baseline as f64, f64::max) * 1.2;
 
     let mut chart = ChartBuilder::on(&root)
-        .caption(format!("Letter vs Word Changes - Discrimination Threshold ({}-bit)", bits), ("sans-serif", 22))
+        .caption(format!("Modification Types - Discrimination Threshold ({}-bit)", bits), ("sans-serif", 22))
         .margin(10)
         .x_label_area_size(40)
         .y_label_area_size(50)
@@ -242,21 +290,37 @@ fn generate_comparison_plot(
         .x_label_formatter(&|x| format!("{}", (2.0_f64).powf(*x) as u32))
         .draw()?;
 
-    // Letter changes combined noise (solid magenta)
+    // Letter changes (magenta)
     let letter_combined: Vec<_> = letter_chrome.iter().zip(letter_firefox.iter())
         .map(|(c, f)| ((c.num_modifications as f64).log2(),
                        (c.mean + 2.0 * c.stdev) + (f.mean + 2.0 * f.stdev)))
         .collect();
     chart.draw_series(LineSeries::new(letter_combined.iter().cloned(), MAGENTA.stroke_width(3)))?
-        .label("Random Letters").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], MAGENTA.stroke_width(3)));
+        .label("Letters (replace)").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], MAGENTA.stroke_width(3)));
 
-    // Word changes combined noise (solid cyan)
+    // Word changes (cyan)
     let word_combined: Vec<_> = word_chrome.iter().zip(word_firefox.iter())
         .map(|(c, f)| ((c.num_modifications as f64).log2(),
                        (c.mean + 2.0 * c.stdev) + (f.mean + 2.0 * f.stdev)))
         .collect();
     chart.draw_series(LineSeries::new(word_combined.iter().cloned(), CYAN.stroke_width(3)))?
-        .label("Random Words").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], CYAN.stroke_width(3)));
+        .label("Words (replace)").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], CYAN.stroke_width(3)));
+
+    // Insert changes (blue)
+    let insert_combined: Vec<_> = insert_chrome.iter().zip(insert_firefox.iter())
+        .map(|(c, f)| ((c.num_modifications as f64).log2(),
+                       (c.mean + 2.0 * c.stdev) + (f.mean + 2.0 * f.stdev)))
+        .collect();
+    chart.draw_series(LineSeries::new(insert_combined.iter().cloned(), BLUE.stroke_width(3)))?
+        .label("Insertions").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], BLUE.stroke_width(3)));
+
+    // Remove changes (red)
+    let remove_combined: Vec<_> = remove_chrome.iter().zip(remove_firefox.iter())
+        .map(|(c, f)| ((c.num_modifications as f64).log2(),
+                       (c.mean + 2.0 * c.stdev) + (f.mean + 2.0 * f.stdev)))
+        .collect();
+    chart.draw_series(LineSeries::new(remove_combined.iter().cloned(), RED.stroke_width(3)))?
+        .label("Removals").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], RED.stroke_width(3)));
 
     // Baseline threshold
     chart.draw_series(LineSeries::new(
@@ -353,6 +417,39 @@ fn randomly_modify_words(input: &str, target_chars: usize) -> String {
             chars[i] = rng.gen_range(b'a'..=b'z') as char;
         }
         chars_changed += field_len;
+    }
+
+    chars.into_iter().collect()
+}
+
+/// Randomly insert N characters at random positions
+fn randomly_insert_chars(input: &str, n: usize) -> String {
+    let mut rng = rand::thread_rng();
+    let mut chars: Vec<char> = input.chars().collect();
+
+    for _ in 0..n {
+        let idx = rng.gen_range(0..=chars.len());
+        let new_char = rng.gen_range(b'a'..=b'z') as char;
+        chars.insert(idx, new_char);
+    }
+
+    chars.into_iter().collect()
+}
+
+/// Randomly remove N characters from random positions (skip structural chars)
+fn randomly_remove_chars(input: &str, n: usize) -> String {
+    let mut rng = rand::thread_rng();
+    let mut chars: Vec<char> = input.chars().collect();
+
+    let mut removed = 0;
+    while removed < n && chars.len() > 1 {
+        let idx = rng.gen_range(0..chars.len());
+        // Skip structural characters
+        if matches!(chars[idx], ',' | '"' | ':' | '[' | ']' | '{' | '}') {
+            continue;
+        }
+        chars.remove(idx);
+        removed += 1;
     }
 
     chars.into_iter().collect()
