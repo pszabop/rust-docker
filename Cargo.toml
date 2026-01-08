@@ -28,5 +28,7 @@ tlsh = "*"
 ffuzzy = "0.3.12"
 nilsimsa = { git = "https://github.com/pszabop/nilsimsa.git", branch = "stable-fix" }
 plotters = "0.3.7"
+bktree = "1.0.1"
+parking_lot = "0.12"
 
 [dev-dependencies]

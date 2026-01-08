@@ -5,8 +5,10 @@ Rust project for analyzing nilsimsa locality-sensitive hash behavior, specifical
 ## Quick Reference
 
 ```bash
-./run.sh        # Run main statistical analysis
-./run.sh test   # Run unit tests (17 tests)
+./run.sh                  # Show available simulations
+./run.sh discrimination   # Run discrimination threshold analysis
+./run.sh uniformity       # Run bit uniformity analysis (for hash segmentation)
+./run.sh test             # Run unit tests (17 tests)
 ```
 
 All execution happens in Docker (see docker-compose.yml). Output files (PNGs) appear in project root.
@@ -44,12 +46,31 @@ Random Removes:     ~64         ~256    chars
 
 Baseline Chrome vs Firefox: 13 bits (64-bit), 63 bits (256-bit)
 
+### Bit Uniformity (for segmentation)
+
+Nilsimsa bit flips are **NOT uniform** across the 256 bits. This affects hash segmentation strategies.
+
+```
+Coefficient of Variation: 1.5 - 3.5 (want <0.1 for uniform)
+Some bits never flip, others flip 30-50% of trials
+```
+
+By 32-bit segment (8 segments total):
+- Segments 1,2 (bits 32-95): Low sensitivity, rarely flip
+- Segment 5 (bits 160-191): High sensitivity, flips ~8x more than seg 2
+
+**Implication**: Simple segment-based fuzzy lookup won't work well. Consider:
+- Weighted segment voting
+- Multi-probe LSH
+- Alternative hashes (simhash) for bucket lookup
+
 ## File Structure
 
 - `src/main.rs` - Statistical analysis + unit tests
 - `chrome_values.json` / `firefox_values.json` - Sample browser fingerprints (CSV format, not JSON)
 - `run.sh` - Docker wrapper for cargo run/test
-- `discrimination_*.png` - Generated comparison plots
+- `discrimination_*.png` - Generated discrimination threshold plots
+- `bit_uniformity_*.png` - Generated bit flip distribution plots
 
 ## Testing Notes
 
