@@ -422,34 +422,98 @@ fn randomly_modify_words(input: &str, target_chars: usize) -> String {
     chars.into_iter().collect()
 }
 
-/// Randomly insert N characters at random positions
-fn randomly_insert_chars(input: &str, n: usize) -> String {
+/// Randomly insert new fields (words) until we've added ~N characters
+fn randomly_insert_chars(input: &str, target_chars: usize) -> String {
     let mut rng = rand::thread_rng();
     let mut chars: Vec<char> = input.chars().collect();
+    let mut chars_added = 0;
 
-    for _ in 0..n {
-        let idx = rng.gen_range(0..=chars.len());
-        let new_char = rng.gen_range(b'a'..=b'z') as char;
-        chars.insert(idx, new_char);
+    let fields = find_csv_fields(&chars);
+    if fields.is_empty() {
+        return input.to_string();
+    }
+
+    while chars_added < target_chars {
+        // Pick a random position between fields to insert
+        let insert_after_field = rng.gen_range(0..fields.len());
+        let insert_pos = fields[insert_after_field].1; // end of that field
+
+        // Generate a random word (3-8 chars)
+        let word_len = rng.gen_range(3..=8);
+        let new_word: String = (0..word_len)
+            .map(|_| rng.gen_range(b'a'..=b'z') as char)
+            .collect();
+
+        // Insert ", newword" at the position
+        let insertion: Vec<char> = format!(", {}", new_word).chars().collect();
+
+        // Insert the characters
+        for (i, c) in insertion.into_iter().enumerate() {
+            chars.insert(insert_pos + i, c);
+        }
+
+        chars_added += word_len;
+
+        // Recalculate field positions since we modified the string
+        // (simplified: just track chars added, don't re-parse every time)
+        if chars_added >= target_chars {
+            break;
+        }
     }
 
     chars.into_iter().collect()
 }
 
-/// Randomly remove N characters from random positions (skip structural chars)
-fn randomly_remove_chars(input: &str, n: usize) -> String {
+/// Randomly remove entire fields (words) until we've removed ~N characters
+fn randomly_remove_chars(input: &str, target_chars: usize) -> String {
     let mut rng = rand::thread_rng();
     let mut chars: Vec<char> = input.chars().collect();
+    let mut chars_removed = 0;
 
-    let mut removed = 0;
-    while removed < n && chars.len() > 1 {
-        let idx = rng.gen_range(0..chars.len());
-        // Skip structural characters
-        if matches!(chars[idx], ',' | '"' | ':' | '[' | ']' | '{' | '}') {
+    let fields = find_csv_fields(&chars);
+    if fields.is_empty() {
+        return input.to_string();
+    }
+
+    let mut removed_indices = std::collections::HashSet::new();
+
+    while chars_removed < target_chars && removed_indices.len() < fields.len() {
+        // Pick a random field to remove
+        let field_idx = rng.gen_range(0..fields.len());
+        if removed_indices.contains(&field_idx) {
             continue;
         }
-        chars.remove(idx);
-        removed += 1;
+        removed_indices.insert(field_idx);
+
+        // We need to recalculate positions since we're modifying
+        let current_fields = find_csv_fields(&chars);
+        if field_idx >= current_fields.len() {
+            continue;
+        }
+
+        let (start, end) = current_fields[field_idx];
+        let field_len = end - start;
+
+        // Find the comma before this field to remove cleanly ", field"
+        let remove_start = if start >= 2 && chars.get(start - 2) == Some(&',') {
+            start - 2
+        } else if start >= 1 && chars.get(start - 1) == Some(&',') {
+            start - 1
+        } else {
+            start
+        };
+        let remove_end = end;
+
+        if remove_start >= remove_end || remove_end > chars.len() {
+            continue;
+        }
+
+        // Remove the characters (in reverse to maintain indices)
+        for i in (remove_start..remove_end).rev() {
+            chars.remove(i);
+        }
+
+        chars_removed += field_len;
     }
 
     chars.into_iter().collect()
