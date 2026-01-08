@@ -4,231 +4,266 @@ use std::fs;
 use plotters::prelude::*;
 
 fn main() {
-    // Read the contents of the JSON files as strings
     let chrome_long = fs::read_to_string("chrome_values.json")
         .expect("Unable to read file chrome_values.json");
     let firefox_long = fs::read_to_string("firefox_values.json")
         .expect("Unable to read file firefox_values.json");
 
-    // Configuration
+    // Debug: show what word modification does
+    println!("=== DEBUG: Word Modification Test ===");
+    println!("Chrome input length: {} chars", chrome_long.len());
+    let chrome_chars: Vec<char> = chrome_long.chars().collect();
+    let fields = find_csv_fields(&chrome_chars);
+    println!("Found {} CSV fields:", fields.len());
+    for (i, (s, e)) in fields.iter().enumerate().take(10) {
+        let content: String = chrome_chars[*s..*e].iter().collect();
+        println!("  [{}] pos {}-{}, len={}: {:?}", i, s, e, e-s, content);
+    }
+
+    println!("\nTesting word modification (target=8 chars):");
+    let modified = randomly_modify_words(&chrome_long, 8);
+    println!("Original len: {}, Modified len: {}", chrome_long.len(), modified.len());
+
+    // Find first difference
+    let orig_chars: Vec<char> = chrome_long.chars().collect();
+    let mod_chars: Vec<char> = modified.chars().collect();
+    let mut diff_count = 0;
+    let mut first_diff = None;
+    for i in 0..orig_chars.len().min(mod_chars.len()) {
+        if orig_chars[i] != mod_chars[i] {
+            diff_count += 1;
+            if first_diff.is_none() {
+                first_diff = Some(i);
+            }
+        }
+    }
+    println!("Chars different: {}", diff_count);
+    if let Some(pos) = first_diff {
+        let start = pos.saturating_sub(10);
+        let end = (pos + 30).min(orig_chars.len());
+        let orig_ctx: String = orig_chars[start..end].iter().collect();
+        let mod_ctx: String = mod_chars[start..end.min(mod_chars.len())].iter().collect();
+        println!("First diff at pos {}: \n  orig: {:?}\n  mod:  {:?}", pos, orig_ctx, mod_ctx);
+    }
+    println!("=== END DEBUG ===\n");
+
     const NUM_TRIALS: usize = 100;
-    // Exponential sampling: 1, 2, 4, 8, 16, 32, 64, 128, 256
-    let mod_counts: Vec<usize> = (0..=8).map(|i| 1 << i).collect();
+    let mod_counts: Vec<usize> = (0..=8).map(|i| 1 << i).collect(); // 1,2,4,8,...256
 
-    // ========== 64-bit analysis ==========
-    println!("========================================");
-    println!("=== 64-bit Nilsimsa Hash Analysis ===");
-    println!("========================================\n");
+    // Calculate baselines
+    let baseline_64 = hamming_distance_64(
+        stable_document_hash_64(&chrome_long),
+        stable_document_hash_64(&firefox_long)
+    );
+    let baseline_256 = hamming_distance_256(
+        &stable_document_hash_256(&chrome_long),
+        &stable_document_hash_256(&firefox_long)
+    );
 
-    let chrome_hash_64 = stable_document_hash_64(&chrome_long);
-    let firefox_hash_64 = stable_document_hash_64(&firefox_long);
-    let baseline_64 = hamming_distance_64(chrome_hash_64, firefox_hash_64);
-    println!("Baseline Chrome vs Firefox: {} / 64 bits ({:.1}%)\n", baseline_64, baseline_64 as f64 / 64.0 * 100.0);
+    println!("Baselines: 64-bit={} bits ({}%), 256-bit={} bits ({}%)\n",
+             baseline_64, baseline_64 as f64 / 64.0 * 100.0,
+             baseline_256, baseline_256 as f64 / 256.0 * 100.0);
 
-    let chrome_stats_64 = run_analysis_64(&chrome_long, NUM_TRIALS, &mod_counts, "Chrome");
-    let firefox_stats_64 = run_analysis_64(&firefox_long, NUM_TRIALS, &mod_counts, "Firefox");
+    // ==================== RANDOM LETTER TEST ====================
+    println!("============================================================");
+    println!("=== TEST 1: RANDOM LETTER CHANGES ===");
+    println!("============================================================\n");
 
-    print_results_table(&chrome_stats_64, &firefox_stats_64, baseline_64);
-    print_discrimination_analysis(&chrome_stats_64, &firefox_stats_64, baseline_64, 64);
+    println!("--- 64-bit Random Letter ---");
+    let letter_chrome_64 = run_analysis(&chrome_long, NUM_TRIALS, &mod_counts, "Chrome", ModType::Letter, HashSize::Bit64);
+    let letter_firefox_64 = run_analysis(&firefox_long, NUM_TRIALS, &mod_counts, "Firefox", ModType::Letter, HashSize::Bit64);
+    print_results_table(&letter_chrome_64, &letter_firefox_64, baseline_64);
+    let letter_limit_64 = find_discrimination_limit(&letter_chrome_64, &letter_firefox_64, baseline_64);
+    println!("Safe limit (64-bit, letters): ~{} chars\n", letter_limit_64);
 
-    // ========== 256-bit analysis ==========
-    println!("\n========================================");
-    println!("=== 256-bit Nilsimsa Hash Analysis ===");
-    println!("========================================\n");
+    println!("--- 256-bit Random Letter ---");
+    let letter_chrome_256 = run_analysis(&chrome_long, NUM_TRIALS, &mod_counts, "Chrome", ModType::Letter, HashSize::Bit256);
+    let letter_firefox_256 = run_analysis(&firefox_long, NUM_TRIALS, &mod_counts, "Firefox", ModType::Letter, HashSize::Bit256);
+    print_results_table(&letter_chrome_256, &letter_firefox_256, baseline_256);
+    let letter_limit_256 = find_discrimination_limit(&letter_chrome_256, &letter_firefox_256, baseline_256);
+    println!("Safe limit (256-bit, letters): ~{} chars\n", letter_limit_256);
 
-    let chrome_hash_256 = stable_document_hash_256(&chrome_long);
-    let firefox_hash_256 = stable_document_hash_256(&firefox_long);
-    let baseline_256 = hamming_distance_256(&chrome_hash_256, &firefox_hash_256);
-    println!("Baseline Chrome vs Firefox: {} / 256 bits ({:.1}%)\n", baseline_256, baseline_256 as f64 / 256.0 * 100.0);
+    // ==================== RANDOM WORD TEST ====================
+    println!("============================================================");
+    println!("=== TEST 2: RANDOM WORD CHANGES (JSON field values) ===");
+    println!("============================================================\n");
 
-    let chrome_stats_256 = run_analysis_256(&chrome_long, NUM_TRIALS, &mod_counts, "Chrome");
-    let firefox_stats_256 = run_analysis_256(&firefox_long, NUM_TRIALS, &mod_counts, "Firefox");
+    println!("--- 64-bit Random Word ---");
+    let word_chrome_64 = run_analysis(&chrome_long, NUM_TRIALS, &mod_counts, "Chrome", ModType::Word, HashSize::Bit64);
+    let word_firefox_64 = run_analysis(&firefox_long, NUM_TRIALS, &mod_counts, "Firefox", ModType::Word, HashSize::Bit64);
+    print_results_table(&word_chrome_64, &word_firefox_64, baseline_64);
+    let word_limit_64 = find_discrimination_limit(&word_chrome_64, &word_firefox_64, baseline_64);
+    println!("Safe limit (64-bit, words): ~{} chars\n", word_limit_64);
 
-    print_results_table(&chrome_stats_256, &firefox_stats_256, baseline_256);
-    print_discrimination_analysis(&chrome_stats_256, &firefox_stats_256, baseline_256, 256);
+    println!("--- 256-bit Random Word ---");
+    let word_chrome_256 = run_analysis(&chrome_long, NUM_TRIALS, &mod_counts, "Chrome", ModType::Word, HashSize::Bit256);
+    let word_firefox_256 = run_analysis(&firefox_long, NUM_TRIALS, &mod_counts, "Firefox", ModType::Word, HashSize::Bit256);
+    print_results_table(&word_chrome_256, &word_firefox_256, baseline_256);
+    let word_limit_256 = find_discrimination_limit(&word_chrome_256, &word_firefox_256, baseline_256);
+    println!("Safe limit (256-bit, words): ~{} chars\n", word_limit_256);
 
-    // Generate discrimination threshold plots
-    generate_discrimination_plot(&chrome_stats_64, &firefox_stats_64, baseline_64,
-                                 "discrimination_threshold_64bit.png", 64)
-        .expect("Failed to generate 64-bit discrimination plot");
+    // ==================== SUMMARY ====================
+    println!("============================================================");
+    println!("=== SUMMARY ===");
+    println!("============================================================");
+    println!("                    64-bit      256-bit");
+    println!("Random Letters:     ~{:<6}     ~{:<6} chars", letter_limit_64, letter_limit_256);
+    println!("Random Words:       ~{:<6}     ~{:<6} chars", word_limit_64, word_limit_256);
+    if word_limit_64 > letter_limit_64 || word_limit_256 > letter_limit_256 {
+        println!("\n=> Word changes show LOCALITY BENEFIT (more tolerant of concentrated changes)");
+    } else if word_limit_64 < letter_limit_64 || word_limit_256 < letter_limit_256 {
+        println!("\n=> Letter changes show better tolerance (no locality benefit)");
+    } else {
+        println!("\n=> No significant difference (nilsimsa treats both similarly)");
+    }
 
-    generate_discrimination_plot(&chrome_stats_256, &firefox_stats_256, baseline_256,
-                                 "discrimination_threshold_256bit.png", 256)
-        .expect("Failed to generate 256-bit discrimination plot");
+    // Generate comparison plots
+    generate_comparison_plot(
+        &letter_chrome_64, &letter_firefox_64,
+        &word_chrome_64, &word_firefox_64,
+        baseline_64, "discrimination_64bit.png", 64
+    ).expect("Failed to generate 64-bit plot");
 
-    println!("\nGenerated PNG files:");
-    println!("  - discrimination_threshold_64bit.png");
-    println!("  - discrimination_threshold_256bit.png");
+    generate_comparison_plot(
+        &letter_chrome_256, &letter_firefox_256,
+        &word_chrome_256, &word_firefox_256,
+        baseline_256, "discrimination_256bit.png", 256
+    ).expect("Failed to generate 256-bit plot");
+
+    println!("\nGenerated: discrimination_64bit.png, discrimination_256bit.png");
 }
+
+#[derive(Clone, Copy)]
+enum ModType { Letter, Word }
+
+#[derive(Clone, Copy)]
+enum HashSize { Bit64, Bit256 }
 
 #[derive(Clone)]
 struct Stats {
     num_modifications: usize,
     mean: f64,
     stdev: f64,
-    min: u32,
-    max: u32,
 }
 
-fn run_analysis_64(input: &str, num_trials: usize, mod_counts: &[usize], name: &str) -> Vec<Stats> {
-    println!("Analyzing {} (64-bit)...", name);
-    let original_hash = stable_document_hash_64(input);
+fn run_analysis(input: &str, num_trials: usize, mod_counts: &[usize], name: &str,
+                mod_type: ModType, hash_size: HashSize) -> Vec<Stats> {
+    let type_str = match mod_type { ModType::Letter => "letter", ModType::Word => "word" };
+    println!("  Analyzing {} ({})...", name, type_str);
+
     let mut results = Vec::with_capacity(mod_counts.len());
 
-    for &num_mods in mod_counts {
+    for &target_chars in mod_counts {
         let mut distances: Vec<u32> = Vec::with_capacity(num_trials);
 
         for _ in 0..num_trials {
-            let modified = randomly_modify_string(input, num_mods);
-            let modified_hash = stable_document_hash_64(&modified);
-            let dist = hamming_distance_64(original_hash, modified_hash);
+            let modified = match mod_type {
+                ModType::Letter => randomly_modify_letters(input, target_chars),
+                ModType::Word => randomly_modify_words(input, target_chars),
+            };
+
+            let dist = match hash_size {
+                HashSize::Bit64 => hamming_distance_64(
+                    stable_document_hash_64(input),
+                    stable_document_hash_64(&modified)
+                ),
+                HashSize::Bit256 => hamming_distance_256(
+                    &stable_document_hash_256(input),
+                    &stable_document_hash_256(&modified)
+                ),
+            };
             distances.push(dist);
         }
 
         let mean = distances.iter().map(|&d| d as f64).sum::<f64>() / num_trials as f64;
         let variance = distances.iter().map(|&d| (d as f64 - mean).powi(2)).sum::<f64>() / num_trials as f64;
         let stdev = variance.sqrt();
-        let min = *distances.iter().min().unwrap();
-        let max = *distances.iter().max().unwrap();
 
-        results.push(Stats { num_modifications: num_mods, mean, stdev, min, max });
-        println!("  {} chars: mean={:.2}, stdev={:.2}, mean+2σ={:.2}", num_mods, mean, stdev, mean + 2.0 * stdev);
+        results.push(Stats { num_modifications: target_chars, mean, stdev });
+        println!("    {} chars: mean={:.2}, mean+2σ={:.2}", target_chars, mean, mean + 2.0 * stdev);
     }
 
-    println!("  Done.\n");
     results
 }
 
-fn run_analysis_256(input: &str, num_trials: usize, mod_counts: &[usize], name: &str) -> Vec<Stats> {
-    println!("Analyzing {} (256-bit)...", name);
-    let original_hash = stable_document_hash_256(input);
-    let mut results = Vec::with_capacity(mod_counts.len());
+fn print_results_table(chrome: &[Stats], firefox: &[Stats], baseline: u32) {
+    println!("  {:>6} | {:>8} {:>8} | {:>8} {:>8} | {:>10} {:>8}",
+             "Chars", "C Mean", "C +2σ", "F Mean", "F +2σ", "Combined", "% Base");
+    println!("  {}", "-".repeat(75));
 
-    for &num_mods in mod_counts {
-        let mut distances: Vec<u32> = Vec::with_capacity(num_trials);
-
-        for _ in 0..num_trials {
-            let modified = randomly_modify_string(input, num_mods);
-            let modified_hash = stable_document_hash_256(&modified);
-            let dist = hamming_distance_256(&original_hash, &modified_hash);
-            distances.push(dist);
-        }
-
-        let mean = distances.iter().map(|&d| d as f64).sum::<f64>() / num_trials as f64;
-        let variance = distances.iter().map(|&d| (d as f64 - mean).powi(2)).sum::<f64>() / num_trials as f64;
-        let stdev = variance.sqrt();
-        let min = *distances.iter().min().unwrap();
-        let max = *distances.iter().max().unwrap();
-
-        results.push(Stats { num_modifications: num_mods, mean, stdev, min, max });
-        println!("  {} chars: mean={:.2}, stdev={:.2}, mean+2σ={:.2}", num_mods, mean, stdev, mean + 2.0 * stdev);
-    }
-
-    println!("  Done.\n");
-    results
-}
-
-fn print_results_table(chrome_stats: &[Stats], firefox_stats: &[Stats], baseline: u32) {
-    println!("=== Results Table ===");
-    println!("{:>6} | {:>8} {:>8} | {:>8} {:>8} | {:>10} {:>10} | {:>8}",
-             "Chars", "C Mean", "C +2σ", "F Mean", "F +2σ", "Combined", "% of Base", "Baseline");
-    println!("{}", "-".repeat(95));
-
-    for (c, f) in chrome_stats.iter().zip(firefox_stats.iter()) {
+    for (c, f) in chrome.iter().zip(firefox.iter()) {
         let c_upper = c.mean + 2.0 * c.stdev;
         let f_upper = f.mean + 2.0 * f.stdev;
         let combined = c_upper + f_upper;
-        let combined_pct = combined / baseline as f64 * 100.0;
-        println!("{:>6} | {:>8.2} {:>8.2} | {:>8.2} {:>8.2} | {:>10.2} {:>9.1}% | {:>8}",
-                 c.num_modifications, c.mean, c_upper, f.mean, f_upper, combined, combined_pct, baseline);
+        let pct = combined / baseline as f64 * 100.0;
+        println!("  {:>6} | {:>8.2} {:>8.2} | {:>8.2} {:>8.2} | {:>10.2} {:>7.1}%",
+                 c.num_modifications, c.mean, c_upper, f.mean, f_upper, combined, pct);
     }
 }
 
-fn print_discrimination_analysis(chrome_stats: &[Stats], firefox_stats: &[Stats], baseline: u32, _bits: u32) {
-    println!("\n=== Discrimination Analysis ===");
-    println!("Baseline browser difference: {} bits", baseline);
-    println!("Combined noise = Chrome(mean+2σ) + Firefox(mean+2σ)");
-    println!("When combined noise >= baseline, can't distinguish browsers.\n");
-
-    // Find where combined (chrome + firefox mean+2σ) crosses baseline
-    let mut cross: Option<(usize, usize)> = None;
-
-    for i in 0..chrome_stats.len() {
-        let c = &chrome_stats[i];
-        let f = &firefox_stats[i];
-        let c_upper = c.mean + 2.0 * c.stdev;
-        let f_upper = f.mean + 2.0 * f.stdev;
-        let combined = c_upper + f_upper;
-
-        if cross.is_none() && combined >= baseline as f64 {
-            let prev_mods = if i > 0 { chrome_stats[i-1].num_modifications } else { 0 };
-            cross = Some((prev_mods, c.num_modifications));
+fn find_discrimination_limit(chrome: &[Stats], firefox: &[Stats], baseline: u32) -> usize {
+    for i in 0..chrome.len() {
+        let c_upper = chrome[i].mean + 2.0 * chrome[i].stdev;
+        let f_upper = firefox[i].mean + 2.0 * firefox[i].stdev;
+        if c_upper + f_upper >= baseline as f64 {
+            return if i > 0 { chrome[i-1].num_modifications } else { 0 };
         }
     }
-
-    match cross {
-        Some((lo, hi)) => {
-            println!("Discrimination lost between {} and {} char modifications", lo, hi);
-            println!("Safe modification limit: ~{} chars", lo);
-        }
-        None => println!("Safe modification limit: >{} chars", chrome_stats.last().unwrap().num_modifications),
-    }
+    chrome.last().unwrap().num_modifications
 }
 
-/// Plot showing when combined modification noise crosses the baseline browser difference
-fn generate_discrimination_plot(chrome: &[Stats], firefox: &[Stats], baseline: u32,
-                                 filename: &str, bits: u32) -> Result<(), Box<dyn std::error::Error>> {
-    let root = BitMapBackend::new(filename, (1000, 600)).into_drawing_area();
+fn generate_comparison_plot(
+    letter_chrome: &[Stats], letter_firefox: &[Stats],
+    word_chrome: &[Stats], word_firefox: &[Stats],
+    baseline: u32, filename: &str, bits: u32
+) -> Result<(), Box<dyn std::error::Error>> {
+    let root = BitMapBackend::new(filename, (1000, 800)).into_drawing_area();
     root.fill(&WHITE)?;
 
-    let max_x = chrome.last().unwrap().num_modifications as f64 * 1.1;
-    // Combined noise can be higher than baseline
-    let max_y = chrome.iter().zip(firefox.iter())
+    let max_x = letter_chrome.last().unwrap().num_modifications as f64 * 1.1;
+
+    // Calculate max Y from all data
+    let all_combined: Vec<f64> = letter_chrome.iter().zip(letter_firefox.iter())
+        .chain(word_chrome.iter().zip(word_firefox.iter()))
         .map(|(c, f)| (c.mean + 2.0 * c.stdev) + (f.mean + 2.0 * f.stdev))
-        .fold(baseline as f64, f64::max) * 1.2;
+        .collect();
+    let max_y = all_combined.iter().cloned().fold(baseline as f64, f64::max) * 1.2;
 
     let mut chart = ChartBuilder::on(&root)
-        .caption(format!("Browser Discrimination Threshold ({}-bit)", bits), ("sans-serif", 24))
+        .caption(format!("Letter vs Word Changes - Discrimination Threshold ({}-bit)", bits), ("sans-serif", 22))
         .margin(10)
         .x_label_area_size(40)
         .y_label_area_size(50)
         .build_cartesian_2d((1.0_f64).log2()..max_x.log2(), 0.0..max_y)?;
 
     chart.configure_mesh()
-        .x_desc("Character Modifications (log scale)")
-        .y_desc("Hamming Distance (bits)")
+        .x_desc("Characters Modified (log scale)")
+        .y_desc("Combined Noise: Chrome(mean+2σ) + Firefox(mean+2σ)")
         .x_label_formatter(&|x| format!("{}", (2.0_f64).powf(*x) as u32))
         .draw()?;
 
-    // Combined noise line (Chrome + Firefox mean+2σ) - this is the key line
-    let combined: Vec<_> = chrome.iter().zip(firefox.iter())
-        .map(|(c, f)| {
-            let c_upper = c.mean + 2.0 * c.stdev;
-            let f_upper = f.mean + 2.0 * f.stdev;
-            ((c.num_modifications as f64).log2(), c_upper + f_upper)
-        })
+    // Letter changes combined noise (solid magenta)
+    let letter_combined: Vec<_> = letter_chrome.iter().zip(letter_firefox.iter())
+        .map(|(c, f)| ((c.num_modifications as f64).log2(),
+                       (c.mean + 2.0 * c.stdev) + (f.mean + 2.0 * f.stdev)))
         .collect();
-    chart.draw_series(LineSeries::new(
-        combined.iter().cloned(),
-        MAGENTA.stroke_width(3),
-    ))?.label("Combined noise (C+F mean+2σ)").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &MAGENTA));
+    chart.draw_series(LineSeries::new(letter_combined.iter().cloned(), MAGENTA.stroke_width(3)))?
+        .label("Random Letters").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], MAGENTA.stroke_width(3)));
 
-    // Baseline threshold line
+    // Word changes combined noise (solid cyan)
+    let word_combined: Vec<_> = word_chrome.iter().zip(word_firefox.iter())
+        .map(|(c, f)| ((c.num_modifications as f64).log2(),
+                       (c.mean + 2.0 * c.stdev) + (f.mean + 2.0 * f.stdev)))
+        .collect();
+    chart.draw_series(LineSeries::new(word_combined.iter().cloned(), CYAN.stroke_width(3)))?
+        .label("Random Words").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], CYAN.stroke_width(3)));
+
+    // Baseline threshold
     chart.draw_series(LineSeries::new(
         [(1.0_f64.log2(), baseline as f64), (max_x.log2(), baseline as f64)],
         GREEN.stroke_width(3),
-    ))?.label(format!("Baseline ({} bits)", baseline)).legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &GREEN));
-
-    // Individual browser lines (lighter, for reference)
-    chart.draw_series(LineSeries::new(
-        chrome.iter().map(|s| ((s.num_modifications as f64).log2(), s.mean + 2.0 * s.stdev)),
-        BLUE.stroke_width(1),
-    ))?.label("Chrome (mean + 2σ)").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &BLUE));
-
-    chart.draw_series(LineSeries::new(
-        firefox.iter().map(|s| ((s.num_modifications as f64).log2(), s.mean + 2.0 * s.stdev)),
-        RED.stroke_width(1),
-    ))?.label("Firefox (mean + 2σ)").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &RED));
+    ))?.label(format!("Baseline ({} bits)", baseline))
+        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], GREEN.stroke_width(3)));
 
     chart.configure_series_labels()
         .position(SeriesLabelPosition::UpperLeft)
@@ -240,57 +275,130 @@ fn generate_discrimination_plot(chrome: &[Stats], firefox: &[Stats], baseline: u
     Ok(())
 }
 
+// ==================== HASH FUNCTIONS ====================
+
 fn stable_document_hash_64(input: &str) -> u64 {
     let mut hasher = nilsimsa::Nilsimsa::new();
     hasher.update(input);
     let hex_str = hasher.digest();
-
-    let truncated_hex = &hex_str[0..16]; // 16 hex digits = 64 bits
-    u64::from_str_radix(truncated_hex, 16).expect("Invalid hex from Nilsimsa")
+    u64::from_str_radix(&hex_str[0..16], 16).expect("Invalid hex")
 }
 
 fn stable_document_hash_256(input: &str) -> [u8; 32] {
     let mut hasher = nilsimsa::Nilsimsa::new();
     hasher.update(input);
-    let hex_str = hasher.digest(); // 64 hex chars = 256 bits
-
+    let hex_str = hasher.digest();
     let mut result = [0u8; 32];
     for i in 0..32 {
-        result[i] = u8::from_str_radix(&hex_str[i * 2..i * 2 + 2], 16)
-            .expect("Invalid hex from Nilsimsa");
+        result[i] = u8::from_str_radix(&hex_str[i * 2..i * 2 + 2], 16).expect("Invalid hex");
     }
     result
 }
 
-fn hex_encode(bytes: &[u8; 32]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+fn hamming_distance_64(a: u64, b: u64) -> u32 {
+    (a ^ b).count_ones()
 }
 
-/// Compute Hamming distance for 64-bit values
-pub fn hamming_distance_64(first: u64, second: u64) -> u32 {
-    (first ^ second).count_ones()
+fn hamming_distance_256(a: &[u8; 32], b: &[u8; 32]) -> u32 {
+    a.iter().zip(b.iter()).map(|(x, y)| (x ^ y).count_ones()).sum()
 }
 
-/// Compute Hamming distance for 256-bit values (as [u8; 32])
-pub fn hamming_distance_256(first: &[u8; 32], second: &[u8; 32]) -> u32 {
-    first.iter().zip(second.iter())
-        .map(|(a, b)| (a ^ b).count_ones())
-        .sum()
-}
+// ==================== MODIFICATION FUNCTIONS ====================
 
-fn randomly_modify_string(input: &str, n: usize) -> String {
+/// Randomly change N individual characters (scattered changes)
+fn randomly_modify_letters(input: &str, n: usize) -> String {
     let mut rng = rand::thread_rng();
     let mut chars: Vec<char> = input.chars().collect();
     let len = chars.len();
 
     for _ in 0..n {
         let mut idx = rng.gen_range(0..len);
-        while chars[idx] == ',' {
+        // Skip structural characters
+        while matches!(chars[idx], ',' | '"' | ':' | '[' | ']' | '{' | '}') {
             idx = rng.gen_range(0..len);
         }
-        let new_char = rng.gen_range(b'a'..=b'z') as char;
-        chars[idx] = new_char;
+        chars[idx] = rng.gen_range(b'a'..=b'z') as char;
     }
 
     chars.into_iter().collect()
+}
+
+/// Randomly change whole comma-separated fields until we've changed ~N characters (concentrated changes)
+fn randomly_modify_words(input: &str, target_chars: usize) -> String {
+    let mut rng = rand::thread_rng();
+    let mut chars: Vec<char> = input.chars().collect();
+    let mut chars_changed = 0;
+
+    // Find all comma-separated field positions
+    let fields = find_csv_fields(&chars);
+    if fields.is_empty() {
+        return input.to_string();
+    }
+
+    // Keep replacing random fields until we hit target
+    let mut replaced_fields = std::collections::HashSet::new();
+    while chars_changed < target_chars && replaced_fields.len() < fields.len() {
+        // Pick a random field we haven't replaced yet
+        let field_idx = rng.gen_range(0..fields.len());
+        if replaced_fields.contains(&field_idx) {
+            continue;
+        }
+        replaced_fields.insert(field_idx);
+
+        let (start, end) = fields[field_idx];
+        let field_len = end - start;
+
+        // Replace with random lowercase letters
+        for i in start..end {
+            chars[i] = rng.gen_range(b'a'..=b'z') as char;
+        }
+        chars_changed += field_len;
+    }
+
+    chars.into_iter().collect()
+}
+
+/// Find all comma-separated field positions (start, end) - excludes the commas and quotes
+fn find_csv_fields(chars: &[char]) -> Vec<(usize, usize)> {
+    let mut fields = Vec::new();
+    let mut start = 0;
+    let mut in_field = false;
+
+    for (i, &c) in chars.iter().enumerate() {
+        match c {
+            '"' => {
+                // Skip quotes at start/end
+                if !in_field {
+                    start = i + 1;
+                }
+            }
+            ',' => {
+                if in_field && i > start + 1 {
+                    fields.push((start, i));
+                }
+                in_field = false;
+                start = i + 1;
+            }
+            ' ' if !in_field => {
+                // Skip leading whitespace
+                start = i + 1;
+            }
+            _ => {
+                if !in_field {
+                    start = i;
+                    in_field = true;
+                }
+            }
+        }
+    }
+    // Don't forget the last field
+    if in_field && chars.len() > start + 1 {
+        let end = if chars.last() == Some(&'"') { chars.len() - 1 } else { chars.len() };
+        if end > start + 1 {
+            fields.push((start, end));
+        }
+    }
+
+    // Filter to fields with at least 2 chars
+    fields.into_iter().filter(|(s, e)| e - s >= 2).collect()
 }
