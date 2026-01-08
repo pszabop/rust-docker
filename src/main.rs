@@ -12,74 +12,53 @@ fn main() {
 
     // Configuration
     const NUM_TRIALS: usize = 100;
-    const MAX_MODIFICATIONS: usize = 200;
+    // Exponential sampling: 1, 2, 4, 8, 16, 32, 64, 128, 256
+    let mod_counts: Vec<usize> = (0..=8).map(|i| 1 << i).collect();
 
     // ========== 64-bit analysis ==========
     println!("========================================");
     println!("=== 64-bit Nilsimsa Hash Analysis ===");
     println!("========================================\n");
 
-    println!("=== Baseline: Chrome vs Firefox (64-bit) ===");
     let chrome_hash_64 = stable_document_hash_64(&chrome_long);
     let firefox_hash_64 = stable_document_hash_64(&firefox_long);
     let baseline_64 = hamming_distance_64(chrome_hash_64, firefox_hash_64);
-    println!("Chrome hash:  {:016x}", chrome_hash_64);
-    println!("Firefox hash: {:016x}", firefox_hash_64);
-    println!("Hamming distance: {} / 64 bits ({:.1}%)\n", baseline_64, baseline_64 as f64 / 64.0 * 100.0);
+    println!("Baseline Chrome vs Firefox: {} / 64 bits ({:.1}%)\n", baseline_64, baseline_64 as f64 / 64.0 * 100.0);
 
-    println!("=== Running 64-bit Statistical Analysis ===");
-    println!("Trials per modification count: {}", NUM_TRIALS);
-    println!("Max modifications: {}\n", MAX_MODIFICATIONS);
+    let chrome_stats_64 = run_analysis_64(&chrome_long, NUM_TRIALS, &mod_counts, "Chrome");
+    let firefox_stats_64 = run_analysis_64(&firefox_long, NUM_TRIALS, &mod_counts, "Firefox");
 
-    let chrome_stats_64 = run_analysis_64(&chrome_long, NUM_TRIALS, MAX_MODIFICATIONS, "Chrome");
-    let firefox_stats_64 = run_analysis_64(&firefox_long, NUM_TRIALS, MAX_MODIFICATIONS, "Firefox");
-
-    print_results_table(&chrome_stats_64, &firefox_stats_64, 64);
+    print_results_table(&chrome_stats_64, &firefox_stats_64, baseline_64);
+    print_discrimination_analysis(&chrome_stats_64, &firefox_stats_64, baseline_64, 64);
 
     // ========== 256-bit analysis ==========
     println!("\n========================================");
     println!("=== 256-bit Nilsimsa Hash Analysis ===");
     println!("========================================\n");
 
-    println!("=== Baseline: Chrome vs Firefox (256-bit) ===");
     let chrome_hash_256 = stable_document_hash_256(&chrome_long);
     let firefox_hash_256 = stable_document_hash_256(&firefox_long);
     let baseline_256 = hamming_distance_256(&chrome_hash_256, &firefox_hash_256);
-    println!("Chrome hash:  {}", hex_encode(&chrome_hash_256));
-    println!("Firefox hash: {}", hex_encode(&firefox_hash_256));
-    println!("Hamming distance: {} / 256 bits ({:.1}%)\n", baseline_256, baseline_256 as f64 / 256.0 * 100.0);
+    println!("Baseline Chrome vs Firefox: {} / 256 bits ({:.1}%)\n", baseline_256, baseline_256 as f64 / 256.0 * 100.0);
 
-    println!("=== Running 256-bit Statistical Analysis ===");
-    println!("Trials per modification count: {}", NUM_TRIALS);
-    println!("Max modifications: {}\n", MAX_MODIFICATIONS);
+    let chrome_stats_256 = run_analysis_256(&chrome_long, NUM_TRIALS, &mod_counts, "Chrome");
+    let firefox_stats_256 = run_analysis_256(&firefox_long, NUM_TRIALS, &mod_counts, "Firefox");
 
-    let chrome_stats_256 = run_analysis_256(&chrome_long, NUM_TRIALS, MAX_MODIFICATIONS, "Chrome");
-    let firefox_stats_256 = run_analysis_256(&firefox_long, NUM_TRIALS, MAX_MODIFICATIONS, "Firefox");
+    print_results_table(&chrome_stats_256, &firefox_stats_256, baseline_256);
+    print_discrimination_analysis(&chrome_stats_256, &firefox_stats_256, baseline_256, 256);
 
-    print_results_table(&chrome_stats_256, &firefox_stats_256, 256);
+    // Generate discrimination threshold plots
+    generate_discrimination_plot(&chrome_stats_64, &firefox_stats_64, baseline_64,
+                                 "discrimination_threshold_64bit.png", 64)
+        .expect("Failed to generate 64-bit discrimination plot");
 
-    // Generate PNG graphs for both
-    generate_mean_plot(&chrome_stats_64, &firefox_stats_64, "hamming_distance_mean_64bit.png", "64-bit")
-        .expect("Failed to generate 64-bit mean plot");
-    generate_combined_plot(&chrome_stats_64, &firefox_stats_64, "hamming_distance_combined_64bit.png", "64-bit", 64)
-        .expect("Failed to generate 64-bit combined plot");
-
-    generate_mean_plot(&chrome_stats_256, &firefox_stats_256, "hamming_distance_mean_256bit.png", "256-bit")
-        .expect("Failed to generate 256-bit mean plot");
-    generate_combined_plot(&chrome_stats_256, &firefox_stats_256, "hamming_distance_combined_256bit.png", "256-bit", 256)
-        .expect("Failed to generate 256-bit combined plot");
-
-    // Comparison plot
-    generate_comparison_plot(&chrome_stats_64, &chrome_stats_256, &firefox_stats_64, &firefox_stats_256,
-                             "hamming_distance_comparison.png")
-        .expect("Failed to generate comparison plot");
+    generate_discrimination_plot(&chrome_stats_256, &firefox_stats_256, baseline_256,
+                                 "discrimination_threshold_256bit.png", 256)
+        .expect("Failed to generate 256-bit discrimination plot");
 
     println!("\nGenerated PNG files:");
-    println!("  - hamming_distance_mean_64bit.png");
-    println!("  - hamming_distance_combined_64bit.png");
-    println!("  - hamming_distance_mean_256bit.png");
-    println!("  - hamming_distance_combined_256bit.png");
-    println!("  - hamming_distance_comparison.png (normalized comparison)");
+    println!("  - discrimination_threshold_64bit.png");
+    println!("  - discrimination_threshold_256bit.png");
 }
 
 #[derive(Clone)]
@@ -91,12 +70,12 @@ struct Stats {
     max: u32,
 }
 
-fn run_analysis_64(input: &str, num_trials: usize, max_mods: usize, name: &str) -> Vec<Stats> {
-    println!("Analyzing {} signature (64-bit)...", name);
+fn run_analysis_64(input: &str, num_trials: usize, mod_counts: &[usize], name: &str) -> Vec<Stats> {
+    println!("Analyzing {} (64-bit)...", name);
     let original_hash = stable_document_hash_64(input);
-    let mut results = Vec::with_capacity(max_mods);
+    let mut results = Vec::with_capacity(mod_counts.len());
 
-    for num_mods in 1..=max_mods {
+    for &num_mods in mod_counts {
         let mut distances: Vec<u32> = Vec::with_capacity(num_trials);
 
         for _ in 0..num_trials {
@@ -113,22 +92,19 @@ fn run_analysis_64(input: &str, num_trials: usize, max_mods: usize, name: &str) 
         let max = *distances.iter().max().unwrap();
 
         results.push(Stats { num_modifications: num_mods, mean, stdev, min, max });
-
-        if num_mods % 20 == 0 {
-            println!("  {} modifications: mean={:.2}, stdev={:.2}", num_mods, mean, stdev);
-        }
+        println!("  {} chars: mean={:.2}, stdev={:.2}, mean+2σ={:.2}", num_mods, mean, stdev, mean + 2.0 * stdev);
     }
 
     println!("  Done.\n");
     results
 }
 
-fn run_analysis_256(input: &str, num_trials: usize, max_mods: usize, name: &str) -> Vec<Stats> {
-    println!("Analyzing {} signature (256-bit)...", name);
+fn run_analysis_256(input: &str, num_trials: usize, mod_counts: &[usize], name: &str) -> Vec<Stats> {
+    println!("Analyzing {} (256-bit)...", name);
     let original_hash = stable_document_hash_256(input);
-    let mut results = Vec::with_capacity(max_mods);
+    let mut results = Vec::with_capacity(mod_counts.len());
 
-    for num_mods in 1..=max_mods {
+    for &num_mods in mod_counts {
         let mut distances: Vec<u32> = Vec::with_capacity(num_trials);
 
         for _ in 0..num_trials {
@@ -145,218 +121,117 @@ fn run_analysis_256(input: &str, num_trials: usize, max_mods: usize, name: &str)
         let max = *distances.iter().max().unwrap();
 
         results.push(Stats { num_modifications: num_mods, mean, stdev, min, max });
-
-        if num_mods % 20 == 0 {
-            println!("  {} modifications: mean={:.2}, stdev={:.2}", num_mods, mean, stdev);
-        }
+        println!("  {} chars: mean={:.2}, stdev={:.2}, mean+2σ={:.2}", num_mods, mean, stdev, mean + 2.0 * stdev);
     }
 
     println!("  Done.\n");
     results
 }
 
-fn print_results_table(chrome_stats: &[Stats], firefox_stats: &[Stats], bits: u32) {
-    println!("=== Results Summary (selected points) ===");
-    println!("{:>8} | {:>12} {:>8} | {:>12} {:>8} | {:>8}",
-             "Mods", "Chrome Mean", "StdDev", "Firefox Mean", "StdDev", "Diff");
-    println!("{}", "-".repeat(75));
+fn print_results_table(chrome_stats: &[Stats], firefox_stats: &[Stats], baseline: u32) {
+    println!("=== Results Table ===");
+    println!("{:>6} | {:>8} {:>8} | {:>8} {:>8} | {:>10} {:>10} | {:>8}",
+             "Chars", "C Mean", "C +2σ", "F Mean", "F +2σ", "Combined", "% of Base", "Baseline");
+    println!("{}", "-".repeat(95));
 
-    // Print at key points: 1, 5, 10, 20, 40, 60, 80, 100, 150, 200
-    let key_points = [1, 5, 10, 20, 40, 60, 80, 100, 150, 200];
+    for (c, f) in chrome_stats.iter().zip(firefox_stats.iter()) {
+        let c_upper = c.mean + 2.0 * c.stdev;
+        let f_upper = f.mean + 2.0 * f.stdev;
+        let combined = c_upper + f_upper;
+        let combined_pct = combined / baseline as f64 * 100.0;
+        println!("{:>6} | {:>8.2} {:>8.2} | {:>8.2} {:>8.2} | {:>10.2} {:>9.1}% | {:>8}",
+                 c.num_modifications, c.mean, c_upper, f.mean, f_upper, combined, combined_pct, baseline);
+    }
+}
 
-    for &n in &key_points {
-        if n <= chrome_stats.len() {
-            let c = &chrome_stats[n - 1];
-            let f = &firefox_stats[n - 1];
-            let diff = (c.mean - f.mean).abs();
-            println!("{:>8} | {:>12.2} {:>8.2} | {:>12.2} {:>8.2} | {:>8.2}",
-                     n, c.mean, c.stdev, f.mean, f.stdev, diff);
+fn print_discrimination_analysis(chrome_stats: &[Stats], firefox_stats: &[Stats], baseline: u32, _bits: u32) {
+    println!("\n=== Discrimination Analysis ===");
+    println!("Baseline browser difference: {} bits", baseline);
+    println!("Combined noise = Chrome(mean+2σ) + Firefox(mean+2σ)");
+    println!("When combined noise >= baseline, can't distinguish browsers.\n");
+
+    // Find where combined (chrome + firefox mean+2σ) crosses baseline
+    let mut cross: Option<(usize, usize)> = None;
+
+    for i in 0..chrome_stats.len() {
+        let c = &chrome_stats[i];
+        let f = &firefox_stats[i];
+        let c_upper = c.mean + 2.0 * c.stdev;
+        let f_upper = f.mean + 2.0 * f.stdev;
+        let combined = c_upper + f_upper;
+
+        if cross.is_none() && combined >= baseline as f64 {
+            let prev_mods = if i > 0 { chrome_stats[i-1].num_modifications } else { 0 };
+            cross = Some((prev_mods, c.num_modifications));
         }
     }
 
-    // Find threshold crossings - scale thresholds based on bit width
-    let max_threshold = if bits == 256 { 64 } else { 16 };
-    let step = if bits == 256 { 4 } else { 1 };
-
-    println!("\n=== Hamming Distance Threshold Crossings ===");
-    println!("{:>10} | {:>15} | {:>15}", "Threshold", "Chrome (mods)", "Firefox (mods)");
-    println!("{}", "-".repeat(50));
-
-    for threshold in (step..=max_threshold).step_by(step as usize) {
-        let chrome_cross = find_threshold_crossing(chrome_stats, threshold as f64);
-        let firefox_cross = find_threshold_crossing(firefox_stats, threshold as f64);
-
-        let chrome_str = chrome_cross.map_or("N/A".to_string(), |v| v.to_string());
-        let firefox_str = firefox_cross.map_or("N/A".to_string(), |v| v.to_string());
-
-        println!("{:>10} | {:>15} | {:>15}", threshold, chrome_str, firefox_str);
-    }
-}
-
-fn find_threshold_crossing(stats: &[Stats], threshold: f64) -> Option<usize> {
-    for s in stats {
-        if s.mean >= threshold {
-            return Some(s.num_modifications);
+    match cross {
+        Some((lo, hi)) => {
+            println!("Discrimination lost between {} and {} char modifications", lo, hi);
+            println!("Safe modification limit: ~{} chars", lo);
         }
+        None => println!("Safe modification limit: >{} chars", chrome_stats.last().unwrap().num_modifications),
     }
-    None
 }
 
-fn generate_mean_plot(chrome: &[Stats], firefox: &[Stats], filename: &str, label: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let root = BitMapBackend::new(filename, (800, 600)).into_drawing_area();
-    root.fill(&WHITE)?;
-
-    let max_x = chrome.len() as f64;
-    let max_y = chrome.iter().chain(firefox.iter()).map(|s| s.mean).fold(0.0_f64, f64::max) * 1.1;
-
-    let mut chart = ChartBuilder::on(&root)
-        .caption(format!("Mean Hamming Distance vs Char Mods ({})", label), ("sans-serif", 24))
-        .margin(10)
-        .x_label_area_size(40)
-        .y_label_area_size(50)
-        .build_cartesian_2d(0.0..max_x, 0.0..max_y)?;
-
-    chart.configure_mesh()
-        .x_desc("Number of Random Character Modifications")
-        .y_desc("Mean Hamming Distance")
-        .draw()?;
-
-    chart.draw_series(LineSeries::new(
-        chrome.iter().map(|s| (s.num_modifications as f64, s.mean)),
-        &BLUE,
-    ))?.label("Chrome").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &BLUE));
-
-    chart.draw_series(LineSeries::new(
-        firefox.iter().map(|s| (s.num_modifications as f64, s.mean)),
-        &RED,
-    ))?.label("Firefox").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &RED));
-
-    chart.configure_series_labels()
-        .background_style(&WHITE.mix(0.8))
-        .border_style(&BLACK)
-        .draw()?;
-
-    root.present()?;
-    Ok(())
-}
-
-fn generate_combined_plot(chrome: &[Stats], firefox: &[Stats], filename: &str, label: &str, bits: u32) -> Result<(), Box<dyn std::error::Error>> {
+/// Plot showing when combined modification noise crosses the baseline browser difference
+fn generate_discrimination_plot(chrome: &[Stats], firefox: &[Stats], baseline: u32,
+                                 filename: &str, bits: u32) -> Result<(), Box<dyn std::error::Error>> {
     let root = BitMapBackend::new(filename, (1000, 600)).into_drawing_area();
     root.fill(&WHITE)?;
 
-    let max_x = chrome.len() as f64;
-    let max_y = chrome.iter().chain(firefox.iter()).map(|s| s.mean + 2.0 * s.stdev).fold(0.0_f64, f64::max) * 1.1;
+    let max_x = chrome.last().unwrap().num_modifications as f64 * 1.1;
+    // Combined noise can be higher than baseline
+    let max_y = chrome.iter().zip(firefox.iter())
+        .map(|(c, f)| (c.mean + 2.0 * c.stdev) + (f.mean + 2.0 * f.stdev))
+        .fold(baseline as f64, f64::max) * 1.2;
 
     let mut chart = ChartBuilder::on(&root)
-        .caption(format!("Hamming Distance vs Char Mods ({}, mean ± 2σ)", label), ("sans-serif", 24))
+        .caption(format!("Browser Discrimination Threshold ({}-bit)", bits), ("sans-serif", 24))
         .margin(10)
         .x_label_area_size(40)
         .y_label_area_size(50)
-        .build_cartesian_2d(0.0..max_x, 0.0..max_y)?;
+        .build_cartesian_2d((1.0_f64).log2()..max_x.log2(), 0.0..max_y)?;
 
     chart.configure_mesh()
-        .x_desc("Number of Random Character Modifications")
-        .y_desc("Hamming Distance")
+        .x_desc("Character Modifications (log scale)")
+        .y_desc("Hamming Distance (bits)")
+        .x_label_formatter(&|x| format!("{}", (2.0_f64).powf(*x) as u32))
         .draw()?;
 
-    // Chrome error band - ±2σ, floor at 0
-    let chrome_band: Vec<_> = chrome.iter()
-        .map(|s| (s.num_modifications as f64, (s.mean - 2.0 * s.stdev).max(0.0), s.mean + 2.0 * s.stdev))
+    // Combined noise line (Chrome + Firefox mean+2σ) - this is the key line
+    let combined: Vec<_> = chrome.iter().zip(firefox.iter())
+        .map(|(c, f)| {
+            let c_upper = c.mean + 2.0 * c.stdev;
+            let f_upper = f.mean + 2.0 * f.stdev;
+            ((c.num_modifications as f64).log2(), c_upper + f_upper)
+        })
         .collect();
-    chart.draw_series(chrome_band.iter().map(|(x, lo, hi)| {
-        Rectangle::new([(*x - 0.5, *lo), (*x + 0.5, *hi)], BLUE.mix(0.2).filled())
-    }))?;
-
-    // Firefox error band - ±2σ, floor at 0
-    let firefox_band: Vec<_> = firefox.iter()
-        .map(|s| (s.num_modifications as f64, (s.mean - 2.0 * s.stdev).max(0.0), s.mean + 2.0 * s.stdev))
-        .collect();
-    chart.draw_series(firefox_band.iter().map(|(x, lo, hi)| {
-        Rectangle::new([(*x - 0.5, *lo), (*x + 0.5, *hi)], RED.mix(0.2).filled())
-    }))?;
-
-    // Chrome mean line
     chart.draw_series(LineSeries::new(
-        chrome.iter().map(|s| (s.num_modifications as f64, s.mean)),
-        BLUE.stroke_width(2),
-    ))?.label("Chrome (mean ± 2σ)").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &BLUE));
+        combined.iter().cloned(),
+        MAGENTA.stroke_width(3),
+    ))?.label("Combined noise (C+F mean+2σ)").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &MAGENTA));
 
-    // Firefox mean line
+    // Baseline threshold line
     chart.draw_series(LineSeries::new(
-        firefox.iter().map(|s| (s.num_modifications as f64, s.mean)),
-        RED.stroke_width(2),
-    ))?.label("Firefox (mean ± 2σ)").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &RED));
+        [(1.0_f64.log2(), baseline as f64), (max_x.log2(), baseline as f64)],
+        GREEN.stroke_width(3),
+    ))?.label(format!("Baseline ({} bits)", baseline)).legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &GREEN));
 
-    // Horizontal lines for hamming thresholds - scale based on bit width
-    let thresholds: Vec<u32> = if bits == 256 { vec![32, 64, 96, 128] } else { vec![8, 16, 24, 32] };
-    for threshold in thresholds.iter() {
-        if (*threshold as f64) < max_y {
-            chart.draw_series(LineSeries::new(
-                [(0.0, *threshold as f64), (max_x, *threshold as f64)],
-                BLACK.stroke_width(1),
-            ))?;
-        }
-    }
+    // Individual browser lines (lighter, for reference)
+    chart.draw_series(LineSeries::new(
+        chrome.iter().map(|s| ((s.num_modifications as f64).log2(), s.mean + 2.0 * s.stdev)),
+        BLUE.stroke_width(1),
+    ))?.label("Chrome (mean + 2σ)").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &BLUE));
+
+    chart.draw_series(LineSeries::new(
+        firefox.iter().map(|s| ((s.num_modifications as f64).log2(), s.mean + 2.0 * s.stdev)),
+        RED.stroke_width(1),
+    ))?.label("Firefox (mean + 2σ)").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &RED));
 
     chart.configure_series_labels()
-        .background_style(&WHITE.mix(0.8))
-        .border_style(&BLACK)
-        .draw()?;
-
-    root.present()?;
-    Ok(())
-}
-
-/// Comparison plot showing normalized (percentage) hamming distance for both bit widths
-fn generate_comparison_plot(chrome_64: &[Stats], chrome_256: &[Stats],
-                            firefox_64: &[Stats], firefox_256: &[Stats],
-                            filename: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let root = BitMapBackend::new(filename, (1000, 600)).into_drawing_area();
-    root.fill(&WHITE)?;
-
-    let max_x = chrome_64.len() as f64;
-
-    let mut chart = ChartBuilder::on(&root)
-        .caption("Normalized Hamming Distance (% of max) - 64-bit vs 256-bit", ("sans-serif", 22))
-        .margin(10)
-        .x_label_area_size(40)
-        .y_label_area_size(50)
-        .build_cartesian_2d(0.0..max_x, 0.0..25.0)?;  // 0-25% range
-
-    chart.configure_mesh()
-        .x_desc("Number of Random Character Modifications")
-        .y_desc("Hamming Distance (% of max bits)")
-        .draw()?;
-
-    // Chrome 64-bit (solid blue)
-    chart.draw_series(LineSeries::new(
-        chrome_64.iter().map(|s| (s.num_modifications as f64, s.mean / 64.0 * 100.0)),
-        BLUE.stroke_width(2),
-    ))?.label("Chrome 64-bit").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], BLUE.stroke_width(2)));
-
-    // Chrome 256-bit (dashed blue)
-    chart.draw_series(LineSeries::new(
-        chrome_256.iter().map(|s| (s.num_modifications as f64, s.mean / 256.0 * 100.0)),
-        BLUE.stroke_width(2),
-    ).point_size(2))?.label("Chrome 256-bit").legend(|(x, y)| {
-        Rectangle::new([(x, y - 2), (x + 20, y + 2)], BLUE.mix(0.5).filled())
-    });
-
-    // Firefox 64-bit (solid red)
-    chart.draw_series(LineSeries::new(
-        firefox_64.iter().map(|s| (s.num_modifications as f64, s.mean / 64.0 * 100.0)),
-        RED.stroke_width(2),
-    ))?.label("Firefox 64-bit").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], RED.stroke_width(2)));
-
-    // Firefox 256-bit (dashed red)
-    chart.draw_series(LineSeries::new(
-        firefox_256.iter().map(|s| (s.num_modifications as f64, s.mean / 256.0 * 100.0)),
-        RED.stroke_width(2),
-    ).point_size(2))?.label("Firefox 256-bit").legend(|(x, y)| {
-        Rectangle::new([(x, y - 2), (x + 20, y + 2)], RED.mix(0.5).filled())
-    });
-
-    chart.configure_series_labels()
+        .position(SeriesLabelPosition::UpperLeft)
         .background_style(&WHITE.mix(0.8))
         .border_style(&BLACK)
         .draw()?;
