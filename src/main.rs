@@ -26,6 +26,7 @@ fn main() {
         "simhash" => benchmarks::simhash_comparison::run(),
         "bktree" => benchmarks::bktree::run(),
         "ratelimiter" => benchmarks::ratelimiter::run(),
+        "fingerprints" => benchmarks::fingerprint_compare::run(),
         _ => {
             eprintln!("Usage: {} <simulation>", args[0]);
             eprintln!();
@@ -37,15 +38,12 @@ fn main() {
             eprintln!("  simhash         - Compare simhash vs nilsimsa for segment stability");
             eprintln!("  bktree          - Benchmark BK-tree for fuzzy hash lookup");
             eprintln!("  ratelimiter     - Benchmark thread-safe rate limiter");
+            eprintln!("  fingerprints    - Compare fingerprints from fingerprints/ directory");
             eprintln!();
             eprintln!("Examples:");
             eprintln!("  ./run.sh uniformity");
             eprintln!("  ./run.sh discrimination");
-            eprintln!("  ./run.sh segmentation");
-            eprintln!("  ./run.sh ratelimit");
-            eprintln!("  ./run.sh simhash");
-            eprintln!("  ./run.sh bktree");
-            eprintln!("  ./run.sh ratelimiter");
+            eprintln!("  ./run.sh fingerprints");
             std::process::exit(1);
         }
     }

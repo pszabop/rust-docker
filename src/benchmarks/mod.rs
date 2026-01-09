@@ -8,3 +8,4 @@ pub mod simhash_comparison;
 pub mod bktree;
 pub mod ratelimiter;
 pub mod discrimination;
+pub mod fingerprint_compare;
