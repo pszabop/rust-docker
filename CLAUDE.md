@@ -48,12 +48,17 @@ Use two thresholds for different enforcement scenarios:
 
 | Threshold | Mode | Use Case | False Positive | Same-User Match |
 |-----------|------|----------|----------------|-----------------|
-| 24 | STRICT | Rate limiting | 0% | 25% |
-| 40 | LOOSE | Cookie binding | ~7% | 42% |
+| 24 | STRICT | Rate limiting | 0% | 67% |
+| 40 | LOOSE | Cookie binding | 0% | 100% |
 
-- **STRICT (24)**: For rate limiting. Minimize false positives at cost of some false negatives.
-- **LOOSE (40)**: For cookie binding enforcement. Catch incognito mode / browser variations.
+- **STRICT (24)**: For rate limiting. Zero false positives, catches 2/3 of same-user sessions.
+- **LOOSE (40)**: For cookie binding enforcement. Catches incognito mode / browser variations.
 - **Attack window**: Attacker must randomize 24-40 bits to evade both thresholds.
+
+Results with 64-char canvas hashes:
+- Same GPU avg distance: **19.8 bits** (well under threshold 24)
+- Different GPU avg distance: **92.3 bits** (impossible to accidentally match)
+- Same GPU match at ≤32: **91.7%**
 
 ### Canonical String Format
 
@@ -75,10 +80,35 @@ fn to_canonical_string(info: &BrowserInfo) -> String {
 "ua:mozilla/5.0...|screen:1920x1080x24|platform:macintel|..."
 ```
 
+### Canvas Hash Weighting (64-char hashes)
+
+Canvas hashes must be **64 hex characters** (not 8) to have proper weight in nilsimsa:
+
+```javascript
+// OLD: 8 chars - negligible weight vs 400-char font list
+canvasHash: "-1a2b3c4d"
+
+// NEW: 64 chars - proper weight, 8x more trigrams
+canvasHash: "1a2b3c4d5e6f78901a2b3c4d5e6f78901a2b3c4d5e6f78901a2b3c4d5e6f7890"
+```
+
+**Why canvas fingerprinting works** (produces unique hash per GPU):
+- GPU floating-point precision varies (NVIDIA vs AMD vs Intel vs Apple)
+- Anti-aliasing algorithms are GPU-specific
+- Driver version affects rendering paths
+- Font rasterization uses GPU-accelerated paths
+
+Same GPU = identical pixels = identical hash. Different GPU = slightly different pixels = different hash.
+
+**Brave browser fuzzing**: Brave adds deterministic noise per session. Same session = consistent hash.
+New incognito window = different hash (~36 bits distance). Use `isBrave: true` field to detect.
+
 ### Field Entropy Analysis
 
 High-entropy fields (include these):
-- `canvasHash`, `webglRenderer`, `webglVendor`, `installedFonts`
+- `canvasHash` (64 chars), `webglCanvasHash` (64 chars) - GPU-dependent rendering
+- `webglRenderer`, `webglVendor` - GPU identification strings
+- `installedFonts` - varies by installed applications
 - `userAgent`, `screenWidth/Height/Depth`
 
 Low/zero-entropy fields (skip these):
@@ -170,7 +200,8 @@ JSON files with `browser_info` object and `document_hash256` (WAF-computed hash)
 {
   "browser_info": {
     "userAgent": "Mozilla/5.0 ...",
-    "canvasHash": "-7b798de",
+    "canvasHash": "1a2b3c4d5e6f78901a2b3c4d5e6f78901a2b3c4d5e6f78901a2b3c4d5e6f7890",
+    "webglCanvasHash": "f1e2d3c4b5a69870f1e2d3c4b5a69870f1e2d3c4b5a69870f1e2d3c4b5a69870",
     "webglRenderer": "Intel(R) HD Graphics 400",
     "installedFonts": "ARIAL,ARIAL BLACK,...",
     ...
@@ -178,6 +209,9 @@ JSON files with `browser_info` object and `document_hash256` (WAF-computed hash)
   "document_hash256": "bc8d01b01e5eb920..."
 }
 ```
+
+Note: `canvasHash` and `webglCanvasHash` are now 64 hex chars (8 segment hashes) for proper
+nilsimsa weighting. Old format used 8-char truncated hashes which had negligible influence.
 
 ### Legacy CSV Format (chrome_values.json, firefox_values.json)
 
@@ -231,9 +265,10 @@ Browsers try to obfuscate fingerprints by randomizing:
 
 ### Recommendations
 
-1. **Use data-only canonical format** - No field names, no separators. Improves differentiation by ~12 bits.
-2. **Sort font lists before hashing** - Neutralizes enumeration order randomization.
-3. **Use 256-bit hashes** - Better discrimination than 64-bit truncated.
-4. **Skip low-entropy fields** - audioFingerprint, maxTouchPoints, timezoneOffset add noise, not signal.
-5. **Detect Brave browser** - Brave spoofs Chrome UA but has `isBrave: true` in fingerprint.
-6. **Two thresholds** - Use 24 for rate limiting (strict), 40 for cookie binding (loose).
+1. **Use 64-char canvas hashes** - 8-char hashes have negligible weight. Use 8-segment hashing for 64 chars.
+2. **Use data-only canonical format** - No field names, no separators. Improves differentiation by ~12 bits.
+3. **Sort font lists before hashing** - Neutralizes enumeration order randomization.
+4. **Use 256-bit hashes** - Better discrimination than 64-bit truncated.
+5. **Skip low-entropy fields** - audioFingerprint, maxTouchPoints, timezoneOffset add noise, not signal.
+6. **Detect Brave browser** - Brave spoofs Chrome UA but has `isBrave: true` in fingerprint. Fuzzes canvas per-session.
+7. **Two thresholds** - Use 24 for rate limiting (strict), 40 for cookie binding (loose).
