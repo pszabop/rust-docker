@@ -7,6 +7,8 @@
 mod hash;
 mod modification;
 mod rate_limiter;
+mod evicting_db;
+mod bktree_db;
 mod benchmarks;
 
 fn main() {
@@ -27,6 +29,8 @@ fn main() {
         "bktree" => benchmarks::bktree::run(),
         "ratelimiter" => benchmarks::ratelimiter::run(),
         "fingerprints" => benchmarks::fingerprint_compare::run(),
+        "evicting" => benchmarks::evicting::run(),
+        "realistic" => benchmarks::realistic::run(),
         _ => {
             eprintln!("Usage: {} <simulation>", args[0]);
             eprintln!();
@@ -39,6 +43,8 @@ fn main() {
             eprintln!("  bktree          - Benchmark BK-tree for fuzzy hash lookup");
             eprintln!("  ratelimiter     - Benchmark thread-safe rate limiter");
             eprintln!("  fingerprints    - Compare fingerprints from fingerprints/ directory");
+            eprintln!("  evicting        - Benchmark evicting database strategies");
+            eprintln!("  realistic       - Benchmark with realistic fingerprint data vs random");
             eprintln!();
             eprintln!("Examples:");
             eprintln!("  ./run.sh uniformity");

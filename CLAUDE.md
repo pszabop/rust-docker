@@ -7,10 +7,12 @@ discrimination and fuzzy rate limiting.
 
 ```bash
 ./run.sh                  # Show available simulations
+./run.sh realistic        # Real fingerprint analysis + threshold selection (primary)
+./run.sh fingerprints     # Compare WAF hash vs data-only hash format
 ./run.sh discrimination   # Run discrimination threshold analysis
 ./run.sh uniformity       # Run bit uniformity analysis (for hash segmentation)
 ./run.sh ratelimiter      # Benchmark thread-safe rate limiter
-./run.sh test             # Run unit tests (15 tests)
+./run.sh test             # Run unit tests
 ```
 
 All execution happens in Docker (see docker-compose.yml). Output files (PNGs) appear in project root.
@@ -39,6 +41,52 @@ browser difference, you can no longer reliably distinguish them.
 than the same number of scattered single-character changes. This is nilsimsa's key property.
 
 ## Current Findings
+
+### Two-Threshold Strategy (Production Recommendation)
+
+Use two thresholds for different enforcement scenarios:
+
+| Threshold | Mode | Use Case | False Positive | Same-User Match |
+|-----------|------|----------|----------------|-----------------|
+| 24 | STRICT | Rate limiting | 0% | 25% |
+| 40 | LOOSE | Cookie binding | ~7% | 42% |
+
+- **STRICT (24)**: For rate limiting. Minimize false positives at cost of some false negatives.
+- **LOOSE (40)**: For cookie binding enforcement. Catch incognito mode / browser variations.
+- **Attack window**: Attacker must randomize 24-40 bits to evade both thresholds.
+
+### Canonical String Format
+
+**DATA-ONLY format** (no field names, no separators) improves differentiation by ~12 bits average:
+```rust
+// GOOD: Data-only format
+fn to_canonical_string(info: &BrowserInfo) -> String {
+    let mut s = String::with_capacity(1024);
+    s.push_str(&info.user_agent.to_lowercase());
+    s.push_str(&info.platform.to_lowercase());
+    s.push_str(&format!("{}{}{}", width, height, depth));  // no separators
+    s.push_str(&info.canvas_hash);
+    s.push_str(&info.webgl_renderer.to_lowercase());
+    // ... high-entropy fields only, no field names
+    s
+}
+
+// BAD: Field-separated format (wastes hash entropy on boilerplate)
+"ua:mozilla/5.0...|screen:1920x1080x24|platform:macintel|..."
+```
+
+### Field Entropy Analysis
+
+High-entropy fields (include these):
+- `canvasHash`, `webglRenderer`, `webglVendor`, `installedFonts`
+- `userAgent`, `screenWidth/Height/Depth`
+
+Low/zero-entropy fields (skip these):
+- `audioFingerprint` (constant "function:44100:1")
+- `maxTouchPoints` (0 for all desktop)
+- `timezoneOffset`, `language`, `productSub`
+
+### Discrimination Thresholds (Synthetic Data)
 
 ```
                     64-bit      256-bit
@@ -86,6 +134,8 @@ src/
 ├── hash.rs              # Nilsimsa hash functions, hamming distance
 ├── modification.rs      # Document modification functions
 ├── rate_limiter.rs      # FuzzyRateLimiter (tokio-compatible)
+├── bktree_db.rs         # BK-tree implementation (slower than SIMD)
+├── evicting_db.rs       # Evicting bucket with SIMD hamming distance
 └── benchmarks/
     ├── mod.rs
     ├── common.rs              # Shared types (Stats, HashSize)
@@ -95,7 +145,14 @@ src/
     ├── simhash_comparison.rs  # Simhash vs nilsimsa comparison
     ├── bktree.rs              # BK-tree benchmark
     ├── ratelimiter.rs         # Rate limiter benchmark
-    └── discrimination.rs      # Browser discrimination analysis
+    ├── discrimination.rs      # Browser discrimination analysis
+    ├── realistic.rs           # Real fingerprint analysis, threshold selection
+    ├── fingerprint_compare.rs # Compare WAF hash vs data-only hash
+    └── evicting.rs            # Evicting bucket benchmark
+
+fingerprints/                  # Real browser fingerprint samples
+├── same/                      # Same browser (Brave), different sessions
+└── different/                 # Different browsers (Chrome, Firefox, Safari)
 ```
 
 Supporting files:
@@ -106,14 +163,34 @@ Supporting files:
 
 ## Testing Notes
 
-The fingerprint files are actually CSV strings wrapped in quotes, not JSON objects:
+### Real Fingerprint Format (fingerprints/ directory)
+
+JSON files with `browser_info` object and `document_hash256` (WAF-computed hash):
+```json
+{
+  "browser_info": {
+    "userAgent": "Mozilla/5.0 ...",
+    "canvasHash": "-7b798de",
+    "webglRenderer": "Intel(R) HD Graphics 400",
+    "installedFonts": "ARIAL,ARIAL BLACK,...",
+    ...
+  },
+  "document_hash256": "bc8d01b01e5eb920..."
+}
+```
+
+### Legacy CSV Format (chrome_values.json, firefox_values.json)
+
+CSV strings wrapped in quotes (older format):
 ```
 "Chrome, 128, 128.0.0, Mac OS X, ..."
 ```
 
-The `find_csv_fields()` function in `modification.rs` parses these comma-separated values.
+The `find_csv_fields()` function in `modification.rs` parses these.
 
-Unit tests use specific (not random) alterations for deterministic results. Tests cover:
+### Unit Tests
+
+Use specific (not random) alterations for deterministic results. Tests cover:
 - Hash consistency
 - Browser discrimination
 - Font list sorting (neutralizes order randomization)
@@ -129,7 +206,7 @@ use hash_correctness::FuzzyRateLimiter;
 let limiter = Arc::new(FuzzyRateLimiter::new(
     12,      // 12 buckets
     10,      // 10 seconds each = 2 minute window
-    30,      // Hamming distance threshold
+    24,      // Hamming distance threshold (STRICT - 0% false positive)
     10_000,  // Capacity per bucket
 ));
 
@@ -142,6 +219,8 @@ if limiter.is_rate_limited(&fingerprint_hash, timestamp_secs, 100) {
 }
 ```
 
+For cookie binding enforcement, use threshold 40 (LOOSE - catches incognito/variations).
+
 ## Browser Fingerprinting Context
 
 Browsers try to obfuscate fingerprints by randomizing:
@@ -150,5 +229,11 @@ Browsers try to obfuscate fingerprints by randomizing:
 - WebGL renderer strings
 - Audio context values
 
-Recommendation: Sort font lists before hashing, use 256-bit, consider removing known-randomized
-fields if you only need browser/OS identification rather than unique user tracking.
+### Recommendations
+
+1. **Use data-only canonical format** - No field names, no separators. Improves differentiation by ~12 bits.
+2. **Sort font lists before hashing** - Neutralizes enumeration order randomization.
+3. **Use 256-bit hashes** - Better discrimination than 64-bit truncated.
+4. **Skip low-entropy fields** - audioFingerprint, maxTouchPoints, timezoneOffset add noise, not signal.
+5. **Detect Brave browser** - Brave spoofs Chrome UA but has `isBrave: true` in fingerprint.
+6. **Two thresholds** - Use 24 for rate limiting (strict), 40 for cookie binding (loose).

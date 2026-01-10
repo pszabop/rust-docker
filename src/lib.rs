@@ -6,6 +6,8 @@
 pub mod hash;
 pub mod modification;
 pub mod rate_limiter;
+pub mod evicting_db;
+pub mod bktree_db;
 pub mod benchmarks;
 
 // Re-export commonly used items

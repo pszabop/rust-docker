@@ -30,5 +30,6 @@ nilsimsa = { git = "https://github.com/pszabop/nilsimsa.git", branch = "stable-f
 plotters = "0.3.7"
 bktree = "1.0.1"
 parking_lot = "0.12"
+flate2 = "1.0"
 
 [dev-dependencies]

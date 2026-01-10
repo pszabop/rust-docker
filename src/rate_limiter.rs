@@ -1,7 +1,11 @@
-//! Thread-safe fuzzy rate limiter using SIMD hamming distance
+//! Thread-safe fuzzy hash database and rate limiter using SIMD hamming distance
 //!
 //! Designed for tokio async contexts. Uses parking_lot::RwLock which is safe
 //! for async code when critical sections are <100μs.
+//!
+//! The core data structure is `FuzzyHashBucket<T>` which stores records keyed by
+//! fuzzy hash. Records are accessed via callback with `&T`, so use interior
+//! mutability (AtomicU32, Mutex, etc.) for mutable fields.
 
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -9,76 +13,107 @@ use parking_lot::RwLock;
 
 use crate::hash::{hash_to_u64, hamming_distance_u64x4};
 
-/// A single time bucket containing fingerprint hashes and their request counts.
+/// A single bucket containing fingerprint hashes and their associated records.
 /// Uses parking_lot::RwLock for better performance than std::sync::RwLock.
-pub struct RateLimitBucket {
+///
+/// Records are accessed via `&T` (shared reference), so use interior mutability
+/// (AtomicU32, Mutex, RwLock, Cell, RefCell) for fields that need mutation.
+/// This allows atomic operations under a read lock for maximum performance.
+pub struct FuzzyHashBucket<T> {
     /// Fingerprint hashes stored as 4 x u64 for SIMD-friendly access
     hashes: RwLock<Vec<[u64; 4]>>,
-    /// Request counts (parallel array to hashes)
-    counts: RwLock<Vec<AtomicU32>>,
+    /// Records (parallel array to hashes)
+    records: RwLock<Vec<T>>,
     /// Number of entries (for lock-free read of size)
     len: AtomicUsize,
 }
 
-impl RateLimitBucket {
+impl<T: Default> FuzzyHashBucket<T> {
     pub fn new(capacity: usize) -> Self {
         Self {
             hashes: RwLock::new(Vec::with_capacity(capacity)),
-            counts: RwLock::new(Vec::with_capacity(capacity)),
+            records: RwLock::new(Vec::with_capacity(capacity)),
             len: AtomicUsize::new(0),
         }
     }
 
-    /// Check request and increment count. Returns (count, is_new).
-    /// This is the hot path - optimized for the common case (found).
+    /// Find an existing entry and call f with shared reference to record.
+    /// Returns None if not found.
     ///
+    /// For mutation, T should use interior mutability (Atomic*, Mutex, etc.).
+    /// This allows atomic operations under a read lock.
+    pub fn find<F, R>(&self, query: &[u64; 4], threshold: u32, f: F) -> Option<R>
+    where
+        F: FnOnce(&T) -> R,
+    {
+        let hashes = self.hashes.read();
+        let records = self.records.read();
+
+        for (i, h) in hashes.iter().enumerate() {
+            if hamming_distance_u64x4(query, h) <= threshold {
+                return Some(f(&records[i]));
+            }
+        }
+        None
+    }
+
+    /// Find existing entry or insert default, then call f with shared reference.
+    /// Returns (result of f, is_new).
+    ///
+    /// This is the hot path - optimized for the common case (found).
     /// Note: Uses parking_lot which doesn't block the tokio runtime for these
     /// short critical sections (<10μs). Safe to call from async context.
-    pub fn check_and_increment(&self, query: &[u64; 4], threshold: u32) -> (u32, bool) {
+    pub fn find_or_insert<F, R>(&self, query: &[u64; 4], threshold: u32, f: F) -> (R, bool)
+    where
+        F: FnOnce(&T) -> R,
+    {
         // Fast path: read lock for search
         {
             let hashes = self.hashes.read();
-            let counts = self.counts.read();
+            let records = self.records.read();
 
             for (i, h) in hashes.iter().enumerate() {
                 if hamming_distance_u64x4(query, h) <= threshold {
-                    // Found - increment atomically (no write lock needed!)
-                    let new_count = counts[i].fetch_add(1, Ordering::Relaxed) + 1;
-                    return (new_count, false);
+                    // Found - call f with shared reference (allows atomic ops)
+                    return (f(&records[i]), false);
                 }
             }
         }
-        // Drop read lock before acquiring write lock
+        // Drop read locks before acquiring write locks
 
         // Slow path: need to insert
         {
             let mut hashes = self.hashes.write();
-            let mut counts = self.counts.write();
+            let mut records = self.records.write();
 
             // Double-check: another thread might have inserted while we waited
             for (i, h) in hashes.iter().enumerate() {
                 if hamming_distance_u64x4(query, h) <= threshold {
-                    let new_count = counts[i].fetch_add(1, Ordering::Relaxed) + 1;
-                    return (new_count, false);
+                    return (f(&records[i]), false);
                 }
             }
 
             // Actually insert
             hashes.push(*query);
-            counts.push(AtomicU32::new(1));
+            records.push(T::default());
+            let idx = records.len() - 1;
             self.len.fetch_add(1, Ordering::Relaxed);
-            (1, true)
+            (f(&records[idx]), true)
         }
     }
 
-    /// Get current count for a fingerprint (read-only)
-    pub fn get_count(&self, query: &[u64; 4], threshold: u32) -> Option<u32> {
+    /// Update an existing entry with exclusive access. Returns None if not found.
+    /// Use this when you need &mut T (e.g., for non-atomic updates).
+    pub fn update<F, R>(&self, query: &[u64; 4], threshold: u32, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut T) -> R,
+    {
         let hashes = self.hashes.read();
-        let counts = self.counts.read();
+        let mut records = self.records.write();
 
         for (i, h) in hashes.iter().enumerate() {
             if hamming_distance_u64x4(query, h) <= threshold {
-                return Some(counts[i].load(Ordering::Relaxed));
+                return Some(f(&mut records[i]));
             }
         }
         None
@@ -94,10 +129,89 @@ impl RateLimitBucket {
 
     pub fn clear(&self) {
         let mut hashes = self.hashes.write();
-        let mut counts = self.counts.write();
+        let mut records = self.records.write();
         hashes.clear();
-        counts.clear();
+        records.clear();
         self.len.store(0, Ordering::Relaxed);
+    }
+}
+
+/// Simple fuzzy hash database without time bucketing.
+/// Good for session stores, reputation tracking, etc.
+pub struct FuzzyHashDB<T> {
+    bucket: FuzzyHashBucket<T>,
+    threshold: u32,
+}
+
+impl<T: Default> FuzzyHashDB<T> {
+    pub fn new(threshold: u32, capacity: usize) -> Self {
+        Self {
+            bucket: FuzzyHashBucket::new(capacity),
+            threshold,
+        }
+    }
+
+    /// Find an existing entry by hash.
+    pub fn find<F, R>(&self, hash: &[u8; 32], f: F) -> Option<R>
+    where
+        F: FnOnce(&T) -> R,
+    {
+        let query = hash_to_u64(hash);
+        self.bucket.find(&query, self.threshold, f)
+    }
+
+    /// Find existing entry or insert default.
+    pub fn find_or_insert<F, R>(&self, hash: &[u8; 32], f: F) -> (R, bool)
+    where
+        F: FnOnce(&T) -> R,
+    {
+        let query = hash_to_u64(hash);
+        self.bucket.find_or_insert(&query, self.threshold, f)
+    }
+
+    /// Update an existing entry with exclusive access.
+    pub fn update<F, R>(&self, hash: &[u8; 32], f: F) -> Option<R>
+    where
+        F: FnOnce(&mut T) -> R,
+    {
+        let query = hash_to_u64(hash);
+        self.bucket.update(&query, self.threshold, f)
+    }
+
+    pub fn len(&self) -> usize {
+        self.bucket.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bucket.is_empty()
+    }
+
+    pub fn clear(&self) {
+        self.bucket.clear();
+    }
+
+    pub fn threshold(&self) -> u32 {
+        self.threshold
+    }
+}
+
+// ============================================================================
+// Rate Limiter - specialized use of FuzzyHashDB with time bucketing
+// ============================================================================
+
+/// Record for rate limiting - uses AtomicU32 for lock-free increment
+#[derive(Default)]
+pub struct RateLimitRecord {
+    pub count: AtomicU32,
+}
+
+impl RateLimitRecord {
+    pub fn increment(&self) -> u32 {
+        self.count.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    pub fn get(&self) -> u32 {
+        self.count.load(Ordering::Relaxed)
     }
 }
 
@@ -105,27 +219,8 @@ impl RateLimitBucket {
 ///
 /// Designed for use with tokio - all operations are fast enough (<50μs)
 /// that they don't need spawn_blocking.
-///
-/// # Example with Tokio
-/// ```ignore
-/// use std::sync::Arc;
-/// use std::time::{SystemTime, UNIX_EPOCH};
-///
-/// let limiter = Arc::new(FuzzyRateLimiter::new(12, 10, 30, 10_000));
-///
-/// // In an async handler:
-/// async fn handle_request(limiter: Arc<FuzzyRateLimiter>, fingerprint: [u8; 32]) -> bool {
-///     let now = SystemTime::now()
-///         .duration_since(UNIX_EPOCH)
-///         .unwrap()
-///         .as_secs();
-///
-///     let count = limiter.check_request(&fingerprint, now);
-///     count <= 100 // Allow up to 100 requests per window
-/// }
-/// ```
 pub struct FuzzyRateLimiter {
-    buckets: Vec<RateLimitBucket>,
+    buckets: Vec<FuzzyHashBucket<RateLimitRecord>>,
     bucket_duration_secs: u64,
     threshold: u32,
     num_buckets: usize,
@@ -143,7 +238,7 @@ impl FuzzyRateLimiter {
     /// Total window = num_buckets * bucket_duration_secs
     pub fn new(num_buckets: usize, bucket_duration_secs: u64, threshold: u32, capacity_per_bucket: usize) -> Self {
         let buckets = (0..num_buckets)
-            .map(|_| RateLimitBucket::new(capacity_per_bucket))
+            .map(|_| FuzzyHashBucket::new(capacity_per_bucket))
             .collect();
         Self {
             buckets,
@@ -167,12 +262,14 @@ impl FuzzyRateLimiter {
         let current_bucket = self.bucket_for_time(timestamp_secs);
 
         // Increment in current bucket
-        let (_, _) = self.buckets[current_bucket].check_and_increment(&query, self.threshold);
+        self.buckets[current_bucket].find_or_insert(&query, self.threshold, |record| {
+            record.increment();
+        });
 
         // Sum counts across all buckets
         let mut total = 0u32;
         for bucket in &self.buckets {
-            if let Some(count) = bucket.get_count(&query, self.threshold) {
+            if let Some(count) = bucket.find(&query, self.threshold, |r| r.get()) {
                 total += count;
             }
         }
@@ -225,3 +322,10 @@ impl FuzzyRateLimiter {
         self.num_buckets as u64 * self.bucket_duration_secs
     }
 }
+
+// ============================================================================
+// Backwards compatibility - re-export old names
+// ============================================================================
+
+/// Backwards compatible alias
+pub type RateLimitBucket = FuzzyHashBucket<RateLimitRecord>;
